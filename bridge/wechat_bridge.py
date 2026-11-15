@@ -23,6 +23,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 import tempfile
 import shutil
@@ -280,6 +281,61 @@ def 语音转文字(聊天, local_id):
         except Exception as e:
             log("方舟转写失败：%r" % (e,))
     return ""
+
+
+def 合成语音(文本, 输出路径):
+    """用 Windows 自带中文语音合成 wav（不需要任何 key）。返回路径或 None。"""
+    文 = re.sub(r'["\r\n]+', " ", str(文本 or "")).strip()[:300]
+    if not 文:
+        return None
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        "$zh = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1; "
+        "if ($zh) { $s.SelectVoice($zh.VoiceInfo.Name) }; "
+        "$s.Rate = 0; $s.Volume = 100; "
+        "$s.SetOutputToWaveFile('%s'); $s.Speak('%s'); $s.Dispose()"
+    ) % (输出路径.replace("'", "''"), 文.replace("'", "''"))
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        log("语音合成失败：%r" % (e,))
+        return None
+    return 输出路径 if os.path.exists(输出路径) and os.path.getsize(输出路径) > 1000 else None
+
+
+def 找播放设备(关键词="CABLE"):
+    """在系统播放设备里找虚拟声卡（VB-CABLE 的「CABLE Input」）。"""
+    try:
+        import sounddevice as sd
+
+        for i, d in enumerate(sd.query_devices()):
+            if int(d.get("max_output_channels") or 0) > 0 and 关键词.lower() in str(d.get("name") or "").lower():
+                return i, str(d.get("name"))
+    except Exception as e:
+        log("枚举音频设备失败：%r" % (e,))
+    return None, ""
+
+
+def 播放到设备(wav_path, 设备号):
+    """把 wav 播到指定设备（虚拟声卡），播完返回 True。"""
+    try:
+        import sounddevice as sd
+        import soundfile as sf
+    except Exception as e:
+        log("播放需要 sounddevice+soundfile：%r" % (e,))
+        return False
+    try:
+        数据, 采样率 = sf.read(wav_path, dtype="float32")
+        sd.play(数据, 采样率, device=设备号)
+        sd.wait()
+        return True
+    except Exception as e:
+        log("播放失败：%r" % (e,))
+        return False
 
 
 def 人类延迟(text, 第几条=0):
