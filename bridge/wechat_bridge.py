@@ -197,12 +197,35 @@ def 方舟转写(wav_path):
     return _抽回复文字(出)
 
 
-def 语音转文字(聊天, local_id):
-    """语音消息 → 文字：落盘 .silk → pysilk 解 pcm → 包成 wav → 方舟转写。
-    任何一步失败都返回空串（调用方按「收到一条语音」处理）。"""
-    键, _, _ = 读语音配置()
-    if not 键:
+_本地模型 = {}
+
+
+def 本地转写(wav_path):
+    """本地 whisper.cpp（pywhispercpp）转写：不需要任何 key，吃 CPU。"""
+    from pywhispercpp.model import Model
+
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    模型路径 = str(cfg.get("语音本地模型") or "").strip() or os.path.join(
+        HOME_DIR, "tools", "whisper", "ggml-base.bin")
+    if not os.path.exists(模型路径):
+        log("本地语音模型不存在：%s" % 模型路径)
         return ""
+    线程 = int(cfg.get("语音线程") or 6)
+    m = _本地模型.get(模型路径)
+    if m is None:
+        m = Model(模型路径, language="zh", n_threads=线程,
+                  print_realtime=False, print_progress=False, print_timestamps=False,
+                  initial_prompt="以下是普通话的句子，请用简体中文转写。")
+        _本地模型[模型路径] = m
+    段 = m.transcribe(wav_path)
+    文 = "".join(getattr(s, "text", "") or "" for s in 段).strip()
+    return 文
+
+
+def 语音转文字(聊天, local_id):
+    """语音消息 → 文字：落盘 .silk → pysilk 解 16k pcm → wav → 本地 whisper 转写。
+    配了方舟密钥也可以走云端（默认优先本地，不用 key）。
+    任何一步失败都返回空串（调用方按「收到一条语音」处理）。"""
     try:
         import wave
 
@@ -213,7 +236,7 @@ def 语音转文字(聊天, local_id):
     try:
         from wechatauto.media import MediaDownloader
 
-        下载器 = MediaDownloader(db)
+        下载器 = MediaDownloader(_DB)
         目录 = os.path.join(INBOUND_DIR, "voice")
         os.makedirs(目录, exist_ok=True)
         路径 = 下载器.download_voice(聊天, local_id, save_dir=目录)
@@ -225,24 +248,38 @@ def 语音转文字(聊天, local_id):
     pcm = 路径 + ".pcm"
     wav = 路径 + ".wav"
     try:
+        # whisper 只认 16k，所以这里就解成 16k（SILK 本身就支持 16k）
         with open(路径, "rb") as fi, open(pcm, "wb") as fo:
-            pysilk.decode(fi, fo, 24000)
+            pysilk.decode(fi, fo, 16000)
         with open(pcm, "rb") as f:
             数据 = f.read()
         with wave.open(wav, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
-            w.setframerate(24000)
+            w.setframerate(16000)
             w.writeframes(数据)
-        log("语音解码：%.1f 秒 → %s" % (len(数据) / 2 / 24000.0, os.path.basename(wav)))
+        log("语音解码：%.1f 秒" % (len(数据) / 2 / 16000.0))
     except Exception as e:
         log("语音解码失败：%r" % (e,))
         return ""
-    try:
-        return 方舟转写(wav)
-    except Exception as e:
-        log("语音转写失败：%r" % (e,))
-        return ""
+
+    键, _, _ = 读语音配置()
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    方式 = str(cfg.get("语音方式") or "本地").strip()
+    if 方式 != "方舟":
+        try:
+            文 = 本地转写(wav)
+            if 文:
+                log("语音转写（本地）：%s" % 文[:40])
+                return 文
+        except Exception as e:
+            log("本地转写失败：%r" % (e,))
+    if 键:
+        try:
+            return 方舟转写(wav)
+        except Exception as e:
+            log("方舟转写失败：%r" % (e,))
+    return ""
 
 
 def 人类延迟(text, 第几条=0):
@@ -259,6 +296,7 @@ def 人类延迟(text, 第几条=0):
 # 零焦点发送开关：2026-11-15 实测只跑到「写进输入框」，微信不认程序化的回车/Invoke，
 # 默认关掉；要继续调就设 DSH_WECHAT_BG_SEND=1。
 后台发送开 = str(os.environ.get("DSH_WECHAT_BG_SEND") or "").strip().lower() in ("1", "true", "yes", "on")
+_DB = None
 _人设带过 = set()
 
 # ---------- 长期记忆（跨天、跨会话） ----------
@@ -694,6 +732,7 @@ def main():
         log("✗ 连不上微信数据库：", repr(e))
         log("  检查：微信登录了吗？微信 → 设置 → 文件管理 → 默认保存位置")
         return 2
+    globals()["_DB"] = db          # 语音转写那几个模块级函数要用
     me = getattr(db, "wxid", "")
     log("当前账号 wxid：", me)
     try:
