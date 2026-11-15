@@ -1,0 +1,17 @@
+# 语音转文字用到的额外依赖（桥接的绿色 Python 不自带 pip，用 DSH 的 python 装到它的 site-packages）
+
+# 1) SILK 解码：微信语音是 .silk，必须先解成 pcm 才能转写
+#    用带 wheel 的包，不需要编译器（pilk 只有源码包，装不上）
+#    silk-python 提供 pysilk 模块：pysilk.decode(f_in, f_out, 24000)
+silk-python==0.2.9
+
+# 安装命令（在 DSH 的 python 里执行）：
+#   C:\Users\32908\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe ^
+#     -m pip install --no-deps --target C:\Users\32908\.dsh\wechat-bridge-runtime\python\Lib\site-packages ^
+#     https://files.pythonhosted.org/packages/ee/80/f063417896bef99e5daaa737d0a18a04af7b6915aab67617b4069989e291/silk_python-0.2.9-cp312-cp312-win_amd64.whl
+
+# 2) 转写：火山方舟（ARK），配置在 wechat-bridge-config.json
+#    "语音密钥": "ARK 的 API Key",
+#    "语音模型": "doubao-seed-2-1-lite-260915",
+#    "语音地址": "https://ark.cn-beijing.volces.com/api/v3"
+#    流程：/files 上传 wav（purpose=user_data）→ 轮询 processed → /responses 带 input_audio 出文字

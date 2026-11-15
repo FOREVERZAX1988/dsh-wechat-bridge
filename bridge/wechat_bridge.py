@@ -115,6 +115,136 @@ def 静默时段(now=None):
     return 小时 >= 静默_起 or 小时 < 静默_止
 
 
+def 读语音配置():
+    """火山方舟的语音识别配置（没给就用环境变量/默认值）。"""
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    键 = str(cfg.get("语音密钥") or "").strip() or str(os.environ.get("ARK_API_KEY") or "").strip()
+    模型 = str(cfg.get("语音模型") or "").strip() or "doubao-seed-2-1-lite-260915"
+    地址 = str(cfg.get("语音地址") or "").strip() or "https://ark.cn-beijing.volces.com/api/v3"
+    return 键, 模型, 地址.rstrip("/")
+
+
+def _抽回复文字(出):
+    """从方舟 /responses 的返回里抠出纯文字（结构有几种写法，都认）。"""
+    try:
+        if isinstance(出, str):
+            return 出.strip()
+        t = 出.get("output_text")
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+        段 = []
+        for 项 in (出.get("output") or []):
+            for c in (项.get("content") or []):
+                if isinstance(c, dict):
+                    v = c.get("text") or c.get("transcript") or c.get("value")
+                    if isinstance(v, str) and v.strip():
+                        段.append(v.strip())
+        文 = "\n".join(段).strip()
+        if not 文:
+            # 兼容 chat/completions 那种形状
+            msg = ((出.get("choices") or [{}])[0] or {}).get("message") or {}
+            文 = str(msg.get("content") or "").strip()
+        return 文
+    except Exception:
+        return ""
+
+
+def 方舟转写(wav_path):
+    """火山方舟语音转文字：先 /files 上传，等 processed，再让模型听音频出字。"""
+    键, 模型, 地址 = 读语音配置()
+    if not 键:
+        return ""
+    import uuid as _uuid
+
+    with open(wav_path, "rb") as f:
+        音频 = f.read()
+    边界 = "----dsh" + _uuid.uuid4().hex
+    体 = (
+        "--%s\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nuser_data\r\n"
+        "--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"voice.wav\"\r\n"
+        "Content-Type: audio/wav\r\n\r\n" % (边界, 边界)
+    ).encode("utf-8") + 音频 + ("\r\n--%s--\r\n" % 边界).encode("utf-8")
+    请求 = urllib.request.Request(
+        地址 + "/files", data=体, method="POST",
+        headers={"authorization": "Bearer " + 键,
+                 "content-type": "multipart/form-data; boundary=" + 边界})
+    with urllib.request.urlopen(请求, timeout=90) as r:
+        上 = json.loads(r.read().decode("utf-8") or "{}")
+    文件id = str(上.get("id") or ((上.get("data") or {}) if isinstance(上.get("data"), dict) else {}).get("id") or "")
+    if not 文件id:
+        log("方舟上传没拿到 file_id：%s" % str(上)[:200])
+        return ""
+    for _ in range(30):
+        请求 = urllib.request.Request(地址 + "/files/" + 文件id,
+                                      headers={"authorization": "Bearer " + 键})
+        with urllib.request.urlopen(请求, timeout=30) as r:
+            信 = json.loads(r.read().decode("utf-8") or "{}")
+        状态 = str(信.get("status") or "").lower()
+        if 状态 in ("processed", "succeeded", "success", "ready"):
+            break
+        if 状态 in ("failed", "error"):
+            log("方舟文件处理失败：%s" % str(信)[:200])
+            return ""
+        time.sleep(1.0)
+    问 = {"model": 模型, "input": [{"role": "user", "content": [
+        {"type": "input_audio", "file_id": 文件id},
+        {"type": "input_text", "text": "请把这段语音转成文字，只输出听到的内容，不要解释，不要加引号。"}]}]}
+    请求 = urllib.request.Request(
+        地址 + "/responses", data=json.dumps(问, ensure_ascii=False).encode("utf-8"), method="POST",
+        headers={"authorization": "Bearer " + 键, "content-type": "application/json"})
+    with urllib.request.urlopen(请求, timeout=180) as r:
+        出 = json.loads(r.read().decode("utf-8") or "{}")
+    return _抽回复文字(出)
+
+
+def 语音转文字(聊天, local_id):
+    """语音消息 → 文字：落盘 .silk → pysilk 解 pcm → 包成 wav → 方舟转写。
+    任何一步失败都返回空串（调用方按「收到一条语音」处理）。"""
+    键, _, _ = 读语音配置()
+    if not 键:
+        return ""
+    try:
+        import wave
+
+        import pysilk
+    except Exception as e:
+        log("语音：缺解码库（pysilk），跳过 %r" % (e,))
+        return ""
+    try:
+        from wechatauto.media import MediaDownloader
+
+        下载器 = MediaDownloader(db)
+        目录 = os.path.join(INBOUND_DIR, "voice")
+        os.makedirs(目录, exist_ok=True)
+        路径 = 下载器.download_voice(聊天, local_id, save_dir=目录)
+    except Exception as e:
+        log("语音落盘失败：%r" % (e,))
+        return ""
+    if not 路径 or not os.path.exists(路径):
+        return ""
+    pcm = 路径 + ".pcm"
+    wav = 路径 + ".wav"
+    try:
+        with open(路径, "rb") as fi, open(pcm, "wb") as fo:
+            pysilk.decode(fi, fo, 24000)
+        with open(pcm, "rb") as f:
+            数据 = f.read()
+        with wave.open(wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(数据)
+        log("语音解码：%.1f 秒 → %s" % (len(数据) / 2 / 24000.0, os.path.basename(wav)))
+    except Exception as e:
+        log("语音解码失败：%r" % (e,))
+        return ""
+    try:
+        return 方舟转写(wav)
+    except Exception as e:
+        log("语音转写失败：%r" % (e,))
+        return ""
+
+
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
     n = len(str(text or ""))
@@ -2678,7 +2808,8 @@ def main():
                 body = clean_text(html.unescape(mt.group(1))) if mt else ""
                 content = "（发来一段视频%s）" % ("：" + body if body else "")
             elif mtype == "语音":
-                content = "（发来一条语音）"
+                文字 = 语音转文字(username, msg.get("local_id"))
+                content = ("（语音转文字：%s）" % 文字) if 文字 else "（发来一条语音）"
             else:
                 return
             if not content or content.startswith("<"):
