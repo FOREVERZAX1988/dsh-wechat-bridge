@@ -545,6 +545,107 @@ def 发语音(聊天, 文本, 音色=None):
     return True, "已发出 %.1f 秒语音（未在库里确认）" % 秒
 
 
+def 读朋友圈(条数=8):
+    """读本地朋友圈缓存（sns.db 的 SnsTimeLine）。没缓存就返回空串。"""
+    try:
+        from wechatauto.moment import MomentDB
+
+        mdb = MomentDB(_DB)
+        原始 = mdb.get_moments(limit=int(条数)) or []
+    except Exception as e:
+        log("读朋友圈失败：%r" % (e,))
+        return ""
+    行们 = []
+    for m in 原始:
+        who = m.get("nickname") or m.get("username") or "某人"
+        文 = str(m.get("contentDesc") or "").replace("\n", " ").strip()
+        时 = float(m.get("create_time") or 0)
+        时间 = time.strftime("%m-%d %H:%M", time.localtime(时)) if 时 else ""
+        行们.append("- %s %s：%s" % (who, 时间, 文[:80] or "（无文字，可能只有图）"))
+    return "\n".join(行们)
+
+
+def 刷新朋友圈(滚几屏=3):
+    """尽力打开「发现 → 朋友圈」并滚两屏，让微信把动态写进本地缓存。
+    返回 True 表示至少点到了朋友圈页。"""
+    import win32api
+    import win32con
+    import win32gui
+    import uiautomation as auto
+
+    主窗 = None
+    for w in auto.GetRootControl().GetChildren():
+        try:
+            if (w.Name or "") == "微信":
+                主窗 = w
+                break
+        except Exception:
+            pass
+    if 主窗 is None:
+        return False
+
+    def 找(root, 名字, 类=None):
+        出 = []
+
+        def walk(c, d=0):
+            if d > 22:
+                return
+            try:
+                for ch in c.GetChildren():
+                    try:
+                        if 名字 in (ch.Name or "") and (类 is None or 类 in (ch.ClassName or "")):
+                            出.append(ch)
+                    except Exception:
+                        pass
+                    walk(ch, d + 1)
+            except Exception:
+                pass
+
+        walk(root)
+        return 出
+
+    def 点(ch):
+        r = ch.BoundingRectangle
+        win32api.SetCursorPos(((r.left + r.right) // 2, (r.top + r.bottom) // 2))
+        time.sleep(0.25)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.08)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+    hwnd = 主窗.NativeWindowHandle
+    try:
+        win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.2)
+        win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.7)
+    except Exception:
+        pass
+    发现 = 找(主窗, "发现", "TabBarItem")
+    if not 发现:
+        log("朋友圈：没找到「发现」")
+        return False
+    点(发现[0])
+    按钮 = []
+    for _ in range(6):
+        time.sleep(1.0)
+        按钮 = 找(主窗, "朋友圈", "Button")
+        if 按钮:
+            break
+    if not 按钮:
+        log("朋友圈：点开「发现」后没找到「朋友圈」按钮")
+        return False
+    点(按钮[0])
+    time.sleep(5)
+    r = win32gui.GetWindowRect(hwnd)
+    win32api.SetCursorPos(((r[0] + r[2]) // 2, (r[1] + r[3]) // 2))
+    for _ in range(int(滚几屏)):
+        win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, -360, 0)
+        time.sleep(1.2)
+    time.sleep(2)
+    return True
+
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
     n = len(str(text or ""))
@@ -3280,6 +3381,23 @@ def main():
                 STATE["唱歌请求"] = (chat, time.time())
                 content = ("（对方让你唱歌：先自嘲半句，然后**立刻**用 [语音]啦啦啦～ 或者念两句歌词哼出来（十秒内），"
                            "别只打字说「我不会」「唱不出」。）\n") + content
+
+            # 主人问朋友圈：先尽力刷一下缓存，再把最近的动态塞给它
+            if ("朋友圈" in str(content or "")) and str(sender_username or username) in [str(x) for x in (CFG.get("主人") or [])]:
+                try:
+                    刷新朋友圈()
+                except Exception as e:
+                    log("刷新朋友圈失败：%r" % (e,))
+                try:
+                    动态 = 读朋友圈(8)
+                except Exception as e:
+                    动态 = ""
+                    log("读朋友圈失败：%r" % (e,))
+                if 动态:
+                    content += "\n（本地缓存里最近的朋友圈：\n%s）" % 动态
+                else:
+                    content += ("\n（本地还没有朋友圈缓存——得先在微信里点开「发现→朋友圈」并往下滑两屏，"
+                                "我才能读到内容。这次我试着点了，如果没成功就别硬编，直接跟主人说没读到。）")
 
             # 每轮都提一句「你能发语音」——会话历史里可能还留着「发不了语音」的旧结论，
             # 不每轮提醒，它会照旧拒绝（2026-11-15 实测）。
