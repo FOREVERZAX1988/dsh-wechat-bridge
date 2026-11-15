@@ -397,6 +397,12 @@ def 播放到设备(wav_path, 设备号):
 
 
 _发语音GUI = {}
+_语音时刻 = {}      # chat → 最近一次发语音的时间（防重复补唱）
+_哼唱词 = [
+    "啦～啦啦～啦啦啦～鱼鱼就这点水平，凑合听嘛",
+    "嗯哼哼～啦啦～跑调了跑调了，别笑",
+    "啦啦啦～（清了清嗓子）就这样吧，再唱要收钱了",
+]
 # 这一轮用哪副面孔（「卖萌」/「御姐」），按聊天记着 —— 发语音时音色要跟文字人设一致
 本轮语气表 = {}
 
@@ -526,12 +532,14 @@ def 发语音(聊天, 文本, 音色=None):
                     ct = float(最新.get("create_time") or 0)
                     if ct <= 0 or time.time() - ct < 30:
                         STATE["last_voice_send"] = time.time()
+                        _语音时刻[聊天] = time.time()
                         log("语音已发出（%.1f 秒）：%s" % (秒, 文本[:20]))
                         return True, "已发出 %.1f 秒语音" % 秒
         except Exception:
             pass
         time.sleep(0.5)
     STATE["last_voice_send"] = time.time()
+    _语音时刻[聊天] = time.time()
     # 库里没确认也别当失败：录音已经播完并松手了，微信这时候基本已经发出去了
     log("语音：库里没确认，但已播完并松手（按成功算）：%s" % 文本[:20])
     return True, "已发出 %.1f 秒语音（未在库里确认）" % 秒
@@ -2369,14 +2377,15 @@ def main():
                                 log("语音段发送失败：%r" % (e,))
                                 continue
                             time.sleep(1.5)
-                    # 有人点歌、它又没主动哼 —— 桥接兜底补一条哼唱语音，别让「不会唱」把话堵死
+                    # 有人点歌、它又没主动哼 —— 桥接兜底补一条哼唱语音，别让「不会唱」把话堵死。
+                    # 注意别再重复：发语音自己会记 _语音时刻，20 秒内这个聊天已经有语音就不补。
                     if not 语音段们:
                         请 = STATE.get("唱歌请求")
-                        if 请 and time.time() - 请[1] < 180:
+                        if (请 and time.time() - 请[1] < 180
+                                and time.time() - _语音时刻.get(chat, 0) > 20):
                             STATE.pop("唱歌请求", None)
                             try:
-                                发语音(chat, "啦啦啦～啦啦～鱼鱼五音不全，凑合听嘛")
-                                STATE["本轮发过语音"] = True
+                                发语音(chat, random.choice(_哼唱词))
                                 log("兜底哼唱：%s" % chat)
                                 time.sleep(1.5)
                             except Exception as e:
