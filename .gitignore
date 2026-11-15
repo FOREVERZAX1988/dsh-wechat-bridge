@@ -1,0 +1,7 @@
+bridge/bridge.log
+*.log
+*.bak
+tmp/
+.pycache/
+__pycache__/
+*.pyc
