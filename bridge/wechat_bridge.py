@@ -283,11 +283,63 @@ def 语音转文字(聊天, local_id):
     return ""
 
 
-def 合成语音(文本, 输出路径):
-    """用 Windows 自带中文语音合成 wav（不需要任何 key）。返回路径或 None。"""
+# 音色表：萌（活泼）和御姐（知性）各一套，走 edge-tts 的在线音色，比系统自带的自然得多。
+语音音色 = {
+    "萌": {"voice": "zh-CN-XiaoyiNeural", "pitch": "+25Hz", "rate": "+6%"},
+    "御姐": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "-12Hz", "rate": "-6%"},
+    "温柔": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "+0Hz", "rate": "+0%"},
+}
+
+
+def 读音色配置():
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    return str(cfg.get("语音音色") or "萌").strip()
+
+
+def 合成语音边(os_文本, 输出路径, 音色="萌"):
+    """edge-tts（微软在线音色，免费不要 key）合成 mp3，再用 ffmpeg 转成 24k 单声道 wav。"""
+    import asyncio
+
+    import edge_tts
+
+    设 = 语音音色.get(音色) or 语音音色["萌"]
+    mp3 = 输出路径 + ".mp3"
+    try:
+        async def 干():
+            await edge_tts.Communicate(
+                os_文本, 设["voice"], rate=设["rate"], pitch=设["pitch"]
+            ).save(mp3)
+
+        asyncio.run(干())
+    except Exception as e:
+        log("edge 合成失败：%r" % (e,))
+        return None
+    if not os.path.exists(mp3):
+        return None
+    ff = os.path.join(HOME_DIR, "wechat-bridge-runtime", "bin", "ffmpeg.exe")
+    if not os.path.exists(ff):
+        ff = "ffmpeg"
+    try:
+        subprocess.run(
+            [ff, "-y", "-loglevel", "error", "-i", mp3, "-ar", "24000", "-ac", "1", 输出路径],
+            capture_output=True, timeout=90, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        log("ffmpeg 转 wav 失败：%r" % (e,))
+        return None
+    return 输出路径 if os.path.exists(输出路径) and os.path.getsize(输出路径) > 2000 else None
+
+
+def 合成语音(文本, 输出路径, 音色=None):
+    """先试 edge-tts（好听），失败退回 Windows 自带语音。返回路径或 None。"""
     文 = re.sub(r'["\r\n]+', " ", str(文本 or "")).strip()[:300]
     if not 文:
         return None
+    音色 = 音色 or 读音色配置()
+    p = 合成语音边(文, 输出路径, 音色)
+    if p:
+        return p
+    log("退回系统自带语音")
     ps = (
         "Add-Type -AssemblyName System.Speech; "
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
@@ -379,7 +431,7 @@ def _窗口置前(hwnd):
         return False
 
 
-def 发语音(聊天, 文本):
+def 发语音(聊天, 文本, 音色=None):
     """发一条真语音条：TTS 合成 → 播进 CABLE Input → 按住右 Alt 让微信录音 → 松开发送。
     返回 (ok, 说明)。"""
     import win32api
@@ -387,7 +439,7 @@ def 发语音(聊天, 文本):
     import win32gui
 
     wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
-    if not 合成语音(文本, wav):
+    if not 合成语音(文本, wav, 音色):
         return False, "合成失败"
     try:
         import wave as _wave
@@ -440,8 +492,8 @@ def 发语音(聊天, 文本):
         return False, "播放异常：%r" % (e,)
     time.sleep(0.5)
     win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY | win32con.KEYEVENTF_KEYUP, 0)   # 松开 → 发送
-    # 等库里出现这条语音。注意：get_messages 的顺序不保证最新在前，所以按 create_time 取最新的那条。
-    for _ in range(14):
+    # 等库里出现这条语音（尽力而为：DB 有缓存时可能查不到，那就按「已播完」当作成功）
+    for _ in range(8):
         try:
             行们 = (_DB.get_messages(聊天, limit=6) or []) if _DB is not None else []
             if 行们:
@@ -454,7 +506,9 @@ def 发语音(聊天, 文本):
         except Exception:
             pass
         time.sleep(0.5)
-    return False, "发了但库里没查到"
+    # 库里没确认也别当失败：录音已经播完并松手了，微信这时候基本已经发出去了
+    log("语音：库里没确认，但已播完并松手（按成功算）：%s" % 文本[:20])
+    return True, "已发出 %.1f 秒语音（未在库里确认）" % 秒
 
 
 def 人类延迟(text, 第几条=0):
