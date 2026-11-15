@@ -391,6 +391,20 @@ def 播放到设备(wav_path, 设备号):
 
 
 _发语音GUI = {}
+# 这一轮用哪副面孔（「卖萌」/「御姐」），按聊天记着 —— 发语音时音色要跟文字人设一致
+本轮语气表 = {}
+
+
+def _猜语气(text):
+    """按文字内容猜该用哪副嗓子：撒娇词多 → 萌；干巴巴讲结论 → 御姐。"""
+    t = str(text or "")
+    萌词 = sum(t.count(w) for w in ("捏", "啦", "嘛", "唔", "～", "~", "呀", "嘻嘻", "摸摸", "鱼鱼"))
+    御词 = sum(t.count(w) for w in ("结论", "其实", "建议", "本质", "别", "不", "问题在", "做法"))
+    if 萌词 > 御词:
+        return "萌"
+    if 御词 > 萌词:
+        return "御姐"
+    return "萌" if len(t) <= 20 else "御姐"
 
 
 def _微信窗口句柄():
@@ -439,6 +453,10 @@ def 发语音(聊天, 文本, 音色=None):
     import win32gui
 
     wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
+    if not 音色:
+        音色 = 本轮语气表.get(聊天) or _猜语气(文本)
+        音色 = "萌" if "萌" in str(音色) else "御姐"
+        log("语音音色：%s（这一轮的语气）" % 音色)
     if not 合成语音(文本, wav, 音色):
         return False, "合成失败"
     try:
@@ -3207,6 +3225,7 @@ def main():
             LAST_CHAT["ts"] = time.time()
             # 每轮随机挑一副面孔：卖萌 / 御姐（2026-11-06 主人要的）
             本轮语气 = "御姐" if random.random() < 0.5 else "卖萌"
+            本轮语气表[chat] = 本轮语气
             content = "（这一轮用「%s」的语气。）\n%s" % (本轮语气, content)
 
             # 人设：每间聊天每天只随第一条消息带一次，不然后面每条都在重复烧 token
