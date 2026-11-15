@@ -338,6 +338,125 @@ def 播放到设备(wav_path, 设备号):
         return False
 
 
+_发语音GUI = {}
+
+
+def _微信窗口句柄():
+    """找微信主窗口（Win32 类是 Qt51514QWindowIcon，标题是「微信」）。"""
+    import win32gui
+
+    找到 = []
+
+    def cb(h, _):
+        try:
+            if (win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h) == "微信"
+                    and win32gui.GetClassName(h).startswith("Qt")):
+                找到.append(h)
+        except Exception:
+            pass
+
+    win32gui.EnumWindows(cb, None)
+    return 找到[0] if 找到 else 0
+
+
+def _窗口置前(hwnd):
+    """把微信拉到前台：先按一下 Alt 解锁前台限制，再 SetForegroundWindow。"""
+    import win32api
+    import win32con
+    import win32gui
+
+    try:
+        win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.15)
+        win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)   # 最大化：不然输入框可能被任务栏挡住
+        time.sleep(0.4)
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.5)
+        return True
+    except Exception as e:
+        log("窗口置前失败：%r" % (e,))
+        return False
+
+
+def 发语音(聊天, 文本):
+    """发一条真语音条：TTS 合成 → 播进 CABLE Input → 按住右 Alt 让微信录音 → 松开发送。
+    返回 (ok, 说明)。"""
+    import win32api
+    import win32con
+    import win32gui
+
+    wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
+    if not 合成语音(文本, wav):
+        return False, "合成失败"
+    try:
+        import wave as _wave
+
+        with _wave.open(wav) as w:
+            秒 = w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        秒 = 0
+    if 秒 < 1.0:
+        return False, "音频太短（%.1f 秒）" % 秒
+    if 秒 > 55:
+        return False, "音频太长（%.1f 秒）" % 秒
+    设备号, 设备名 = 找播放设备("CABLE")
+    if 设备号 is None:
+        return False, "没找到虚拟声卡（VB-CABLE 装了吗）"
+    hwnd = _微信窗口句柄()
+    if not hwnd:
+        return False, "没找到微信窗口"
+    if not _窗口置前(hwnd):
+        return False, "微信置前失败"
+    gui = _发语音GUI.get("g")
+    if gui is None:
+        from wechatauto import WeChatGUI
+
+        gui = WeChatGUI()
+        _发语音GUI["g"] = gui
+    try:
+        if not gui._open_chat_and_settle(聊天):
+            return False, "切不到会话「%s」" % 聊天
+    except Exception as e:
+        return False, "切会话失败：%r" % (e,)
+    time.sleep(0.8)
+    左, 上, 右, 下 = win32gui.GetWindowRect(hwnd)
+    ix, iy = 左 + int((右 - 左) * 0.55), 下 - 110
+    win32api.SetCursorPos((ix, iy))
+    time.sleep(0.2)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.1)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.6)
+    开始 = time.time()
+    win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY, 0)   # 右 Alt 按下
+    time.sleep(1.0)
+    try:
+        if not 播放到设备(wav, 设备号):
+            win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY | win32con.KEYEVENTF_KEYUP, 0)
+            return False, "播放失败"
+    except Exception as e:
+        win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY | win32con.KEYEVENTF_KEYUP, 0)
+        return False, "播放异常：%r" % (e,)
+    time.sleep(0.5)
+    win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY | win32con.KEYEVENTF_KEYUP, 0)   # 松开 → 发送
+    # 等库里出现这条语音。注意：get_messages 的顺序不保证最新在前，所以按 create_time 取最新的那条。
+    for _ in range(14):
+        try:
+            行们 = (_DB.get_messages(聊天, limit=6) or []) if _DB is not None else []
+            if 行们:
+                最新 = max(行们, key=lambda r: float(r.get("create_time") or 0))
+                if str(最新.get("type") or "") == "语音":
+                    ct = float(最新.get("create_time") or 0)
+                    if ct <= 0 or time.time() - ct < 30:
+                        log("语音已发出（%.1f 秒）：%s" % (秒, 文本[:20]))
+                        return True, "已发出 %.1f 秒语音" % 秒
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False, "发了但库里没查到"
+
+
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
     n = len(str(text or ""))
