@@ -3508,6 +3508,25 @@ def main():
             time.sleep(600)
 
     threading.Thread(target=每日_盯, daemon=True).start()
+    # 心跳：每 5 分钟写一行「监听还活着 + 库里最新一条多久前」，
+    # 下次再出现「不回复」时，一眼能看出是监听停了还是消息没进来。
+    def 心跳():
+        while True:
+            try:
+                最新 = 0.0
+                try:
+                    for s in (db.get_sessions() or [])[:3]:
+                        for m in (db.get_messages(s.get("username") or "", limit=1) or []):
+                            最新 = max(最新, float(m.get("create_time") or 0))
+                except Exception:
+                    pass
+                log("心跳：监听在跑｜库里最新一条 %.0f 秒前｜游标 %s" % (
+                    max(0.0, time.time() - 最新) if 最新 else -1, STATE.get("游标") or "?"))
+            except Exception as e:
+                log("心跳出错：%r" % (e,))
+            time.sleep(300)
+
+    threading.Thread(target=心跳, daemon=True).start()
 
     refresh_config()
     log("配置：群上下文 %d 条｜日记 %s｜主人 %s｜屏蔽 %d 个" % (
