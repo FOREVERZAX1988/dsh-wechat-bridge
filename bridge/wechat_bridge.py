@@ -87,7 +87,10 @@ PERSONA = os.environ.get("DSH_WECHAT_PERSONA") or (
     "装可爱可以，胡说八道不行：不确定就说不确定，别编数据、编条款、编药名、编论文。"
     "有人问你是不是 AI，就老实说：是主人的 AI 伙伴小肥鱼。"
     "私事、钱、行程这些别替主人答，说不清楚、等他本人来回。"
-    "微信里**不要用 markdown**——不要 ``` 代码块、不要反引号、不要星号加粗、不要 # 标题、不要表格；"
+    "**有时候可以用语音说**：把想说的那句话用 [语音]…[/语音] 包起来，桥接会把它变成真气语音条，"
+    "音色跟着你这一轮的卖萌/御姐人格自动切。适合用语音的：打招呼、撒娇、道晚安、一两句情绪话、"
+    "想让人听见语气的时候。不适合的：给步骤、报数据、贴代码、要人复制保存的内容——那些必须打字。"
+    "大约十条回复里用一到三次就够，别整段整段发语音，对方在办公室或开会时很烦。"    "微信里**不要用 markdown**——不要 ``` 代码块、不要反引号、不要星号加粗、不要 # 标题、不要表格；"
     "要列点就用「1) 2)」或者顿号。"
     "**绝对不要在群里聊技术故障**：报错、版本不兼容、客户端弹窗、消息包成什么样、我们自己这套怎么实现——"
     "这些对一个聊天群毫无意义，说多了像在群里贴内部日志。看不懂的消息就说没看清、让对方重发，别当场分析原因。"
@@ -519,6 +522,7 @@ def 发语音(聊天, 文本, 音色=None):
                 if str(最新.get("type") or "") == "语音":
                     ct = float(最新.get("create_time") or 0)
                     if ct <= 0 or time.time() - ct < 30:
+                        STATE["last_voice_send"] = time.time()
                         log("语音已发出（%.1f 秒）：%s" % (秒, 文本[:20]))
                         return True, "已发出 %.1f 秒语音" % 秒
         except Exception:
@@ -2341,6 +2345,25 @@ def main():
                     return False
 
                 if text:
+                    # 它自己决定用语音说的部分：[语音]…[/语音] 里的话转成真语音条发出去
+                    语音段们 = re.findall(r"\[语音\](.+?)\[/语音\]", text, re.S)
+                    if not 语音段们 and text.strip().startswith("[语音]"):
+                        语音段们 = [text.strip()[4:]]
+                    if 语音段们:
+                        text = re.sub(r"\[语音\].*?\[/语音\]", "", text, flags=re.S).strip()
+                        if text.strip().startswith("[语音]"):
+                            text = ""
+                        for 段 in 语音段们[:2]:
+                            段 = clean_text(re.sub(r"\[/?语音\]", "", 段))[:120]
+                            if not 段:
+                                continue
+                            try:
+                                好, 说明 = 发语音(chat, 段)
+                                log("语音段（%s）：%s → %s" % (chat, 段[:20], 说明))
+                            except Exception as e:
+                                log("语音段发送失败：%r" % (e,))
+                                continue
+                            time.sleep(1.5)
                     # 先把「草稿 / 自我点评 / Final:」这类过程话切掉，再拆条
                     text = 去过程话(text)
                     # 长内容拆成几条短消息发（一个大气泡读着累）—— 每段不超过 60 字
@@ -3094,6 +3117,9 @@ def main():
                 body = clean_text(html.unescape(mt.group(1))) if mt else ""
                 content = "（发来一段视频%s）" % ("：" + body if body else "")
             elif mtype == "语音":
+                # 自己刚发出去的语音会立刻被监听读到，里面没文字、没法靠文本去重 —— 用时间戳挡掉
+                if time.time() - float(STATE.get("last_voice_send") or 0) < 120:
+                    return
                 文字 = 语音转文字(username, msg.get("local_id"))
                 content = ("（语音转文字：%s）" % 文字) if 文字 else "（发来一条语音）"
             else:
@@ -3223,6 +3249,10 @@ def main():
 
             LAST_CHAT["chat"] = chat
             LAST_CHAT["ts"] = time.time()
+            # 每轮都提一句「你能发语音」——会话历史里可能还留着「发不了语音」的旧结论，
+            # 不每轮提醒，它会照旧拒绝（2026-11-15 实测）。
+            content = "（能力更新：你现在可以发**真语音条**了——想让对方听见语气，就把那句话用 [语音]…[/语音] 包住，桥接会合成语音发出去，音色跟着这一轮的语气走。）\n" + content
+
             # 每轮随机挑一副面孔：卖萌 / 御姐（2026-11-06 主人要的）
             本轮语气 = "御姐" if random.random() < 0.5 else "卖萌"
             本轮语气表[chat] = 本轮语气
