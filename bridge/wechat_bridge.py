@@ -124,6 +124,11 @@ def 人类延迟(text, 第几条=0):
         秒 = 2.2 + n * 0.09          # 60 字 ≈ 7.6 秒
     秒 = max(2.0, min(22.0, 秒))
     return 秒 * random.uniform(0.75, 1.45)
+
+
+# 零焦点发送开关：2026-11-15 实测只跑到「写进输入框」，微信不认程序化的回车/Invoke，
+# 默认关掉；要继续调就设 DSH_WECHAT_BG_SEND=1。
+后台发送开 = str(os.environ.get("DSH_WECHAT_BG_SEND") or "").strip().lower() in ("1", "true", "yes", "on")
 _人设带过 = set()
 
 # ---------- 长期记忆（跨天、跨会话） ----------
@@ -1676,6 +1681,111 @@ def main():
             log("补回车失败：%r" % (e,))
             return False
 
+    def _后台发送一段(text, chat):
+        """零焦点发送（照搬 whale_girl 的 bg_sender 思路）：
+        用 UIA 的 ValuePattern 直接写进输入框，再 Invoke「发送」按钮 ——
+        全程不调用 SetForegroundWindow / SetFocus / SendInput，所以不抢前台。
+
+        只在目标会话已经开着的时候用；切会话那套还得走前台通道。
+        返回 True 表示「库里确认发出去了」。
+        """
+        try:
+            uia = _取引擎()
+            gui = get_gui()
+            if uia is None or gui is None:
+                log("后台通道：没有引擎/gui")
+                return False
+            当前 = ""
+            try:
+                当前 = str(uia.current_chat() or "")
+            except Exception:
+                当前 = ""
+            if 当前 != str(chat):
+                log("后台通道：当前会话是「%s」，不是「%s」，退回前台" % (当前, chat))
+                return False
+            ctrl = uia._chat_input()
+            if ctrl is None:
+                log("后台通道：拿不到输入框控件（UIA 树没物化），退回前台")
+                return False
+            vp = ctrl.GetValuePattern()
+            if vp is None:
+                log("后台通道：输入框不支持 ValuePattern，退回前台")
+                return False
+            try:
+                vp.SetValue("")
+            except Exception:
+                pass
+            vp.SetValue(text)
+            time.sleep(0.9)
+            try:
+                回读 = str(vp.Value or "")
+            except Exception:
+                回读 = "（读不回来）"
+            log("后台通道：写进去后输入框是「%s」" % 回读[:30])
+
+            # 先试「给主窗口 PostMessage 一个回车」—— Qt 会把 WM_KEYDOWN 转成给焦点控件的按键，
+            # 全程不动前台。不行再退到点「发送」按钮。
+            try:
+                import win32con
+                import win32gui
+
+                句柄 = int(getattr(gui, "hwnd", 0) or 0)
+                if 句柄:
+                    win32gui.PostMessage(句柄, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
+                    time.sleep(0.06)
+                    win32gui.PostMessage(句柄, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
+                    for _ in range(10):
+                        if _already_sent(text, chat, within=12):
+                            log("后台通道发出去（回车投递，没抢前台）：%s" % text[:30])
+                            return True
+                        time.sleep(0.4)
+            except Exception as e:
+                log("后台通道：投递回车失败 %r" % (e,))
+
+            # 「发送」按钮不在输入框旁边，得从整棵窗口树里找。
+            # 实测：ButtonControl / mmui::XOutlineButton / Name == "发送"
+            # （注意别误伤「发送文件」「发送收藏」「发送表情」那几个）。
+            根 = ctrl
+            for _ in range(12):
+                父 = 根.GetParentControl()
+                if 父 is None:
+                    break
+                根 = 父
+
+            def _找发送(节点, 深=0):
+                if 深 > 20:
+                    return None
+                try:
+                    for ch in 节点.GetChildren():
+                        try:
+                            if (ch.ControlTypeName == "ButtonControl"
+                                    and str(ch.Name or "").strip() == "发送"):
+                                return ch
+                        except Exception:
+                            pass
+                        得 = _找发送(ch, 深 + 1)
+                        if 得 is not None:
+                            return 得
+                except Exception:
+                    pass
+                return None
+
+            按钮 = _找发送(根)
+            if 按钮 is None:
+                log("后台通道：没找到「发送」按钮（UIA 树可能没物化），退回前台")
+                return False
+            按钮.GetInvokePattern().Invoke()
+            for _ in range(15):
+                if _already_sent(text, chat, within=15):
+                    log("后台通道发出去（没抢前台）：%s" % text[:30])
+                    return True
+                time.sleep(0.4)
+            log("后台通道：点了发送但库里没出现，退回前台")
+            return False
+        except Exception as e:
+            log("后台通道出错（退回前台通道）：%r" % (e,))
+            return False
+
     def send_one(item):
         text = str(item.get("text") or "").strip()
         chat = str(item.get("chat") or "").strip()
@@ -1837,7 +1947,14 @@ def main():
                         # 晚一步记就会被监听线程当成「主人自己新说的」再转进 DSH —— 自问自答就是这么来的。
                         recently_sent.append((clean_text(一), time.time()))
                         STATE["last_send"] = time.time()
-                        ok = 试(lambda g, t=一: g.send_msg(t, chat, True), "发文字")
+                        # 零焦点通道默认关：2026-11-15 实测「写值」能进去，但微信不认程序化的
+                        # 回车/Invoke（按钮一直没被点亮），只会白等 6 秒再退回前台。
+                        # 想继续调：设 DSH_WECHAT_BG_SEND=1 打开，看日志里的「后台通道：」。
+                        ok = False
+                        if 后台发送开:
+                            ok = _后台发送一段(一, chat)
+                        if not ok:
+                            ok = 试(lambda g, t=一: g.send_msg(t, chat, True), "发文字")
                         if not ok and _already_sent(一, chat, within=25):
                             log("接口说失败，但库里查到了 —— 算发成功：%s" % 一[:30])
                             ok = True
