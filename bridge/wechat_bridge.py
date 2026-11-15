@@ -3383,7 +3383,7 @@ def main():
                            "别只打字说「我不会」「唱不出」。）\n") + content
 
             # 主人问朋友圈：先尽力刷一下缓存，再把最近的动态塞给它
-            if ("朋友圈" in str(content or "")) and str(sender_username or username) in [str(x) for x in (CFG.get("主人") or [])]:
+            if ("朋友圈" in str(content or "")) and str(sender or username) in [str(x) for x in (CFG.get("主人") or [])]:
                 try:
                     刷新朋友圈()
                 except Exception as e:
