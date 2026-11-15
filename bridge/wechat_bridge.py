@@ -3267,7 +3267,7 @@ def main():
             LAST_CHAT["chat"] = chat
             LAST_CHAT["ts"] = time.time()
             # 点名让你唱歌时，狠狠推一把：光靠人设它只会打字说「五音不全」
-            if re.search(r"(唱|哼)(一)?(首|个|句|段)|来一首|表演个", str(text or "")):
+            if re.search(r"(唱|哼)(一)?(首|个|句|段)|来一首|表演个", str(content or "")):
                 STATE["唱歌请求"] = (chat, time.time())
                 content = ("（对方让你唱歌：先自嘲半句，然后**立刻**用 [语音]啦啦啦～ 或者念两句歌词哼出来（十秒内），"
                            "别只打字说「我不会」「唱不出」。）\n") + content
