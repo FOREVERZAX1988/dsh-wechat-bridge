@@ -3422,6 +3422,9 @@ def main():
                     content = "（%s）\n%s" % (PERSONA, content)
             r = http_json("/dsh-wechat-bridge/receive", {
                 "text": content,
+                # 原话（不带记忆前缀/提示词）——宿主用它判断「问题修复：」这种派活指令，
+                # 否则记忆前缀里出现「问题修复：」就会把普通聊天误当成修复任务
+                "raw": str(raw or "")[:300],
                 "chat": chat,
                 # 会话的底层 id（好友 wxid / xxx@chatroom）：绑定和屏蔽填这个名字也认，
                 # 改备注、同名都不怕对不上
