@@ -1211,9 +1211,20 @@ def main():
         rows = rows[:-1][-limit:]      # 最后一条就是当前这句，去掉
         lines = []
         for m in rows:
-            if (m.get("type") or "") != "文本":
+            类 = (m.get("type") or "")
+            原始 = m.get("content") or ""
+            # 引用回复也算上下文：能看出「谁在回谁」，模型才不会把别人的对话当成跟自己说的
+            回给谁 = ""
+            引 = re.search(r"<refermsg>.*?<displayname>(.*?)</displayname>", 原始, re.S)
+            if 引:
+                回给谁 = clean_text(html.unescape(引.group(1)))[:12]
+            if 类 == "文本":
+                txt = clean_text(原始)
+            elif 类 == "文件/链接/卡片":
+                mt = re.search(r"<title>(.*?)</title>", 原始, re.S)
+                txt = clean_text(html.unescape(mt.group(1))) if mt else ""
+            else:
                 continue
-            txt = clean_text(m.get("content") or "")
             if not txt or txt.startswith("<"):
                 continue
             ts = float(m.get("create_time") or 0)
@@ -1226,7 +1237,7 @@ def main():
                 who = "%s（主人）" % (display_name(sid) or "主人")
             else:
                 who = display_name(sid) or "某人"
-            lines.append("[%s] %s：%s" % (t, who, txt))
+            lines.append("[%s] %s%s：%s" % (t, who, (" 回复 " + 回给谁) if 回给谁 else "", txt))
         if not lines:
             return ""
         return "（「%s」刚才在聊：\n%s\n）\n" % (chat, "\n".join(lines))
@@ -3365,15 +3376,22 @@ def main():
                 if not at_me and not is_master(sender, nickname) and not 频率允许(chat):
                     return
                 prefix = group_context(username, chat, CFG["群上下文条数"])
-                hint = (
-                    "（这条点名了你，必须回。）"
-                    if at_me
-                    else "（没点你的名。先看上面那几条上下文再决定："
-                         "别人在互相聊、话题已经翻篇、聊的东西你插不上嘴、或者只是路过一句 —— 别回。"
-                         "但别因为怕说错就一律闭嘴：有人提问、聊到你懂的、在吐槽要接梗，就自然接一两句。"
-                         "拿不准又想表个态，就只发一个表情 —— 回复只写 [表情: 关键词]（比如 [表情: 震惊]）。"
-                         "决定不说才回 [不回]。）"
-                )
+                当前回给 = ""
+                引 = re.search(r"<refermsg>.*?<displayname>(.*?)</displayname>", raw, re.S)
+                if 引:
+                    当前回给 = clean_text(html.unescape(引.group(1)))[:12]
+                if at_me:
+                    hint = "（这条点名了你，必须回。）"
+                elif 当前回给:
+                    hint = ("（这条是「%s」在回复「%s」的，基本不是跟你说的——除非内容明显在问你，"
+                            "否则别接，直接 [不回]。）" % (nickname or "有人", 当前回给))
+                else:
+                    hint = ("（没点你的名。**先判断这条是跟谁说的**，再决定开不开口："
+                            "① 上下文里带「回复 某某」的行，就是在跟那个人说话，别插嘴；"
+                            "② 别人一来一回接话、聊的是他们之间的事，别接；"
+                            "③ 只有这几种才值得开口：有人在问一个你确实懂的公共问题、在吐槽需要接梗、在跟你打招呼。"
+                            "拿不准就只发一个表情（回复只写 [表情: 关键词]），或者干脆 [不回]。"
+                            "插错话比不说话难看得多。）")
                 content = (prefix or "") + hint + content
 
             # 长期记忆：把这个群/这个人的档案带上一两行（有才带）
