@@ -652,6 +652,49 @@ def 刷新朋友圈(滚几屏=3):
     time.sleep(2)
     return True
 
+def 读链接(url, 最多=900):
+    """把网页正文抓下来（公众号文章走 js_content，普通网页就去标签）。
+    返回「标题\n正文节选」，失败返回空串。"""
+    u = str(url or "").strip()
+    if not u.startswith("http"):
+        return ""
+    try:
+        import urllib.request
+
+        请求 = urllib.request.Request(u, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"),
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        })
+        t0 = time.time()
+        with urllib.request.urlopen(请求, timeout=15) as r:
+            原文 = r.read().decode("utf-8", errors="replace")
+        log("读链接：%s（%d 字节，%.1fs）" % (u[:60], len(原文), time.time() - t0))
+    except Exception as e:
+        log("读链接失败：%s ｜ %r" % (u[:60], e))
+        return ""
+    if not 原文:
+        return ""
+    标题 = ""
+    mt = re.search(r"<h1[^>]*>(.*?)</h1>", 原文, re.S)
+    if mt:
+        标题 = html.unescape(re.sub(r"<[^>]+>", "", mt.group(1))).strip()[:80]
+    正文 = ""
+    mc = re.search(r'id="js_content"[^>]*>(.*?)</div>\s*</div>', 原文, re.S)
+    if mc:
+        正文 = mc.group(1)
+    else:
+        正文 = re.sub(r"<script.*?</script>", " ", 原文, flags=re.S)
+        正文 = re.sub(r"<style.*?</style>", " ", 正文, flags=re.S)
+        正文 = re.sub(r"<(nav|header|footer).*?</\1>", " ", 正文, flags=re.S)
+    正文 = re.sub(r"<[^>]+>", " ", 正文)
+    正文 = html.unescape(re.sub(r"\s+", " ", 正文)).strip()
+    if not 正文:
+        return ""
+    if len(正文) > 最多:
+        正文 = 正文[:最多] + "…"
+    return ("标题：%s\n正文节选：%s" % (标题, 正文)) if 标题 else ("正文节选：%s" % 正文)
+
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
     n = len(str(text or ""))
@@ -3260,14 +3303,20 @@ def main():
                         mu = re.search(r"<url>(.*?)</url>", raw, re.S)
                         link = clean_text(html.unescape(mu.group(1))) if mu else ""
                         if link.startswith("http"):
-                            content = "（分享了一个链接：%s）" % link[:200]
+                            正文 = 读链接(link)
+                            content = ("（分享了一个链接，我抓到了正文——\n%s\n）" % 正文) if 正文 \
+                                else ("（分享了一个链接：%s，正文没抓到）" % link[:200])
                     elif content and "http" not in content:
                         # 带标题的分享卡片也补一句域名 —— 视频/文章分得清，但里面的内容本来就看不到
                         mu = re.search(r"<url>(.*?)</url>", raw, re.S)
                         if mu:
-                            host = re.match(r"https?://([^/]+)", html.unescape(mu.group(1)).strip())
-                            if host:
-                                content += "（链接来自 %s）" % host.group(1)
+                            链接 = html.unescape(mu.group(1)).strip()
+                            正文 = 读链接(链接)
+                            if 正文:
+                                content += "（我抓到了这个链接的正文——\n%s\n）" % 正文
+                            else:
+                                host = re.match(r"https?://([^/]+)", 链接)
+                                content += "（链接来自 %s，正文没抓到，可能需要登录或反爬）" % (host.group(1) if host else "网页")
             elif mtype in ("视频", "视频号"):
                 mt = re.search(r"<title>(.*?)</title>", raw, re.S)
                 body = clean_text(html.unescape(mt.group(1))) if mt else ""
