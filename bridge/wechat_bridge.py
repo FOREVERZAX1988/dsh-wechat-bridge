@@ -3500,6 +3500,13 @@ def main():
                         content = (f"（引用：{quoted}）{body}" if quoted else body).strip()
                     else:
                         content = body
+                    # 视频号 / 小程序卡片没有网页地址（<url /> 是空的），抓不到内容 —— 得跟模型说清楚，
+                    # 不然它会对着一句标题瞎编里面的内容。
+                    类型号 = re.search(r"<type>(\d+)</type>", raw)
+                    mu0 = re.search(r"<url>(.*?)</url>", raw, re.S)
+                    有地址 = bool(mu0 and clean_text(html.unescape(mu0.group(1))).startswith("http"))
+                    if content and not 有地址:
+                        content += "（这是视频号/小程序卡片，没有网页地址，我打不开里面的内容——只能说标题，别编内容）"
                     if not content:
                         # 没标题的分享卡片（视频号 / 网页链接）：把链接本身给模型，好歹能看出是什么
                         mu = re.search(r"<url>(.*?)</url>", raw, re.S)
