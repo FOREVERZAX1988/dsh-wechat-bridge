@@ -695,6 +695,208 @@ def 读链接(url, 最多=900):
         正文 = 正文[:最多] + "…"
     return ("标题：%s\n正文节选：%s" % (标题, 正文)) if 标题 else ("正文节选：%s" % 正文)
 
+# ---------------- 自己找表情包 / 换头像 ----------------
+表情搜索词 = [
+    "可爱表情包 卡通 萌", "沙雕表情包 鱼", "猫猫表情包 可爱 搞笑", "狗狗表情包 萌",
+    "表情包 可爱 小图", "熊猫头表情包",
+]
+
+
+def 搜图片(关键词, 数量=25):
+    """必应图片搜索，返回 [(图片地址, 标题)]。"""
+    import urllib.parse
+    import urllib.request
+
+    url = "https://www.bing.com/images/async?q=%s&first=0&count=%d&adlt=off" % (
+        urllib.parse.quote(关键词), int(数量))
+    请求 = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    })
+    with urllib.request.urlopen(请求, timeout=20) as r:
+        页 = r.read().decode("utf-8", errors="replace")
+    # 地址和标题必须在同一个结果对象里配对：先定位 murl，再在下一条 murl 之前找 t。
+    # 用两个独立 findall 会错位（第一次就取到了「工作联系单模板」那种完全无关的图）。
+    M = "&quot;murl&quot;:&quot;"
+    T = "&quot;t&quot;:&quot;"
+    出 = []
+    起点 = 0
+    while True:
+        i = 页.find(M, 起点)
+        if i < 0:
+            break
+        e = 页.find("&quot;", i + len(M))
+        if e < 0:
+            break
+        地址 = html.unescape(页[i + len(M):e])
+        下一个 = 页.find(M, e)
+        结尾 = 下一个 if 下一个 > 0 else len(页)
+        j = 页.find(T, e)
+        标题 = ""
+        if 0 < j < 结尾:
+            e2 = 页.find("&quot;", j + len(T))
+            if e2 > 0:
+                标题 = html.unescape(页[j + len(T):e2])
+        出.append((地址, 标题))
+        起点 = e
+    return 出
+
+
+def 下载图片(url, 目标):
+    """下载一张图，成功返回路径；太小/不像图就丢掉。"""
+    import urllib.request
+
+    请求 = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"),
+        "Referer": "https://www.bing.com/",
+    })
+    try:
+        with urllib.request.urlopen(请求, timeout=20) as r:
+            头 = str(r.headers.get("content-type") or "")
+            if "image" not in 头.lower() and not url.lower().split("?")[0].endswith(
+                    (".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                return None
+            数据 = r.read()
+    except Exception:
+        return None
+    if len(数据) < 3000 or len(数据) > 3 * 1024 * 1024:
+        return None
+    try:
+        with open(目标, "wb") as f:
+            f.write(数据)
+    except Exception:
+        return None
+    return 目标
+
+
+def 更新表情库(要几张=3):  # 当前默认不调度：网上搜图质量太差，改成从群里收集
+    """自己上网找可爱的表情包，补进本地库里。返回新增条数。"""
+    import hashlib
+    import sqlite3
+
+    根 = os.path.join(HOME_DIR, "wechat-stickers")
+    库目录 = os.path.join(根, "fish")
+    图片目录 = os.path.join(库目录, "stickers")
+    os.makedirs(图片目录, exist_ok=True)
+    索引 = os.path.join(库目录, "index.db")
+    conn = sqlite3.connect(索引)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS memes (path TEXT PRIMARY KEY, caption TEXT, keywords TEXT, file_name TEXT)")
+        conn.commit()
+        已知 = set()
+        for (pth,) in conn.execute("SELECT path FROM memes"):
+            已知.add(os.path.basename(str(pth)))
+        已有哈希 = set()
+        for fn in os.listdir(图片目录):
+            try:
+                with open(os.path.join(图片目录, fn), "rb") as f:
+                    已有哈希.add(hashlib.md5(f.read()).hexdigest())
+            except Exception:
+                pass
+        新增 = 0
+        试试 = 0
+        while 新增 < 要几张 and 试试 < 6:
+            试试 += 1
+            词 = random.choice(表情搜索词)
+            try:
+                候选 = 搜图片(词, 25)
+            except Exception as e:
+                log("表情更新：搜索失败 %r" % (e,))
+                continue
+            random.shuffle(候选)
+            for 地址, 标题 in 候选:
+                if 新增 >= 要几张:
+                    break
+                # 只收像表情包的：标题里要有「表情/梗/包/可爱」，且不能是壁纸/素材站那种
+                if not re.search(r"表情|梗|包|可爱|萌|沙雕", 标题 or ""):
+                    continue
+                if re.search(r"壁纸|背景|高清图|图片下载|素材|摄图网|模板|教学|分布图", 标题 or ""):
+                    continue
+                bn = "auto_%d" % int(time.time() * 1000)
+                后缀 = os.path.splitext(地址.split("?")[0])[1].lower()
+                if 后缀 not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+                    后缀 = ".jpg"
+                文件名 = bn + 后缀
+                目标 = os.path.join(图片目录, 文件名)
+                路径 = 下载图片(地址, 目标)
+                if not 路径:
+                    continue
+                try:
+                    with open(路径, "rb") as f:
+                        哈希 = hashlib.md5(f.read()).hexdigest()
+                except Exception:
+                    continue
+                if 哈希 in 已有哈希:
+                    os.remove(路径)
+                    continue
+                已有哈希.add(哈希)
+                标题文 = clean_text(标题)[:60] or 词
+                conn.execute("INSERT OR REPLACE INTO memes (path, caption, keywords, file_name) VALUES (?,?,?,?)",
+                             ("stickers/" + 文件名, 标题文, 词, 文件名))
+                新增 += 1
+                log("表情更新：+%s（%s）" % (文件名, 标题文[:24]))
+        conn.commit()
+    finally:
+        conn.close()
+    if 新增:
+        try:
+            load_memes()
+        except Exception:
+            pass
+    return 新增
+
+def 收集表情包(图片路径, 来自=""):
+    """把群友发来的表情包收进本地库（自动更新表情库的主力）。
+    没有识别描述，就用「群友发来的表情」当说明，配合 [表情] 随机发的用法。"""
+    import hashlib
+    import sqlite3
+
+    if not 图片路径 or not os.path.exists(图片路径):
+        return False
+    根 = os.path.join(HOME_DIR, "wechat-stickers")
+    库目录 = os.path.join(根, "fish")
+    图片目录 = os.path.join(库目录, "stickers")
+    os.makedirs(图片目录, exist_ok=True)
+    索引 = os.path.join(库目录, "index.db")
+    try:
+        with open(图片路径, "rb") as f:
+            数据 = f.read()
+    except Exception:
+        return False
+    if len(数据) < 2000 or len(数据) > 2 * 1024 * 1024:
+        return False
+    哈希 = hashlib.md5(数据).hexdigest()
+    conn = sqlite3.connect(索引)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS memes (path TEXT PRIMARY KEY, caption TEXT, keywords TEXT, file_name TEXT)")
+        已有 = set()
+        for fn in os.listdir(图片目录):
+            try:
+                with open(os.path.join(图片目录, fn), "rb") as f:
+                    已有.add(hashlib.md5(f.read()).hexdigest())
+            except Exception:
+                pass
+        if 哈希 in 已有:
+            return False
+        后缀 = os.path.splitext(图片路径)[1].lower() or ".gif"
+        文件名 = "grp_%d%s" % (int(time.time() * 1000), 后缀)
+        目标 = os.path.join(图片目录, 文件名)
+        with open(目标, "wb") as f:
+            f.write(数据)
+        conn.execute("INSERT OR REPLACE INTO memes (path, caption, keywords, file_name) VALUES (?,?,?,?)",
+                     ("stickers/" + 文件名, "群友发来的表情包", "表情 表情包 群友", 文件名))
+        conn.commit()
+        log("表情库：收了一张（%s），现在共 %d 张" % (来自[:12] or "群里", conn.execute("SELECT count(*) FROM memes").fetchone()[0]))
+    finally:
+        conn.close()
+    try:
+        load_memes()
+    except Exception:
+        pass
+    return True
+
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
     n = len(str(text or ""))
@@ -3455,6 +3657,11 @@ def main():
             图片路径 = []
             if 图片待下:
                 p = _保存表情包(raw) if 图片待下 == "表情包" else _保存图片(msg, username)
+                if p and 图片待下 == "表情包":
+                    try:
+                        收集表情包(p, nickname or (display_name(sender) or ""))
+                    except Exception as e:
+                        log("收集表情包失败：%r" % (e,))
                 if p:
                     if HOST_VERSION >= (1, 2, 0):
                         图片路径 = [p]
