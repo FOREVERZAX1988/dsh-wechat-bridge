@@ -293,10 +293,19 @@ def 语音转文字(聊天, local_id):
 
 
 # 音色表：萌（活泼）和御姐（知性）各一套，走 edge-tts 的在线音色，比系统自带的自然得多。
+# 音色表。中文原生 + 多语言混着用：多语言那几个（Ava / Emma）嗓子更软更自然。
 语音音色 = {
     "萌": {"voice": "zh-CN-XiaoyiNeural", "pitch": "+25Hz", "rate": "+6%"},
+    "温柔": {"voice": "en-US-EmmaMultilingualNeural", "pitch": "+5Hz", "rate": "-2%"},
+    "知性": {"voice": "en-US-AvaMultilingualNeural", "pitch": "-6Hz", "rate": "-4%"},
     "御姐": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "-12Hz", "rate": "-6%"},
-    "温柔": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "台湾软": {"voice": "zh-TW-HsiaoChenNeural", "pitch": "-2Hz", "rate": "-3%"},
+    "东北": {"voice": "zh-CN-liaoning-XiaobeiNeural", "pitch": "+6Hz", "rate": "+2%"},
+}
+# 同一副面孔下可以随机换的嗓子（避免每次都一模一样）
+音色池 = {
+    "萌": ["萌", "温柔"],
+    "御姐": ["御姐", "知性"],
 }
 
 
@@ -311,6 +320,9 @@ def 合成语音边(os_文本, 输出路径, 音色="萌"):
 
     import edge_tts
 
+    池 = 音色池.get(音色)
+    if 池:
+        音色 = random.choice(池)
     设 = 语音音色.get(音色) or 语音音色["萌"]
     mp3 = 输出路径 + ".mp3"
     try:
