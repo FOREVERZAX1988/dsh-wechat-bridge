@@ -336,18 +336,88 @@ def 读硅基配置():
     return 键, 模型
 
 
+def 读克隆音色表():
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    表 = cfg.get("克隆音色表") or {}
+    return 表 if isinstance(表, dict) else {}
+
+
+def 克隆音色(音频路径, 名字, 参考文本=""):
+    """把一段参考音频传上去，换回专属音色 uri（之后合成就用这个 uri 当 voice）。
+    参考音频 10~30 秒、干净单人声最像；太长反而糊。"""
+    import uuid as _uuid
+
+    键, 模型 = 读硅基配置()
+    if not 键:
+        return None, "没配硅基流动密钥"
+    if not os.path.exists(音频路径):
+        return None, "参考音频不存在：%s" % 音频路径
+    if os.path.getsize(音频路径) > 20 * 1024 * 1024:
+        return None, "参考音频太大（>20MB）"
+    with open(音频路径, "rb") as f:
+        音频 = f.read()
+    边界 = "----dsh" + _uuid.uuid4().hex
+
+    def 段(名, 值):
+        return ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                % (边界, 名, 值)).encode("utf-8")
+
+    体 = 段("model", 模型)
+    # customName 只允许字母数字下划线短横线 —— 中文名会被 400 拒掉（2026-11-23 踩过）
+    安全名 = re.sub(r"[^A-Za-z0-9_-]", "_", str(名字 or ""))[:56]
+    if not 安全名.strip("_"):
+        安全名 = "voice_%d" % int(time.time())
+    体 += 段("customName", 安全名)
+    if 参考文本:
+        体 += 段("text", str(参考文本)[:500])
+    后缀 = os.path.splitext(音频路径)[1].lower() or ".wav"
+    体 += ("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"ref%s\"\r\n"
+           "Content-Type: audio/wav\r\n\r\n" % (边界, 后缀)).encode("utf-8")
+    体 += 音频 + b"\r\n" + ("--%s--\r\n" % 边界).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.siliconflow.cn/v1/uploads/audio/voice", data=体, method="POST",
+        headers={"Authorization": "Bearer " + 键,
+                 "Content-Type": "multipart/form-data; boundary=" + 边界})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            出 = json.loads(r.read().decode("utf-8") or "{}")
+    except Exception as e:
+        return None, "上传失败：%r" % (e,)
+    uri = str(出.get("uri") or "").strip()
+    if not uri:
+        return None, "上传没有返回 uri：%s" % str(出)[:120]
+    try:
+        配置 = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+        表 = 配置.get("克隆音色表") or {}
+        if not isinstance(表, dict):
+            表 = {}
+        表[str(名字)] = uri
+        配置["克隆音色表"] = 表
+        with open(os.path.join(HOME_DIR, "wechat-bridge-config.json"), "w", encoding="utf-8") as f:
+            json.dump(配置, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("克隆音色存盘失败：%r" % (e,))
+    log("克隆音色成功：%s → %s" % (名字, uri[:40]))
+    return uri, "好了：%s" % 名字
+
 def 合成语音硅基(文本, 输出路径, 音色="萌"):
     """硅基流动 CosyVoice2 在线合成：给个音色名，回来一段 mp3，再用 ffmpeg 转 wav。"""
     键, 模型 = 读硅基配置()
     if not 键:
         return None
-    音 = 硅基音色.get(str(音色), "anna")
+    克隆 = 读克隆音色表()
+    if str(音色) in 克隆:
+        音 = 克隆[str(音色)]
+        uri = 音
+    else:
+        音 = 硅基音色.get(str(音色), "anna")
+        uri = ""
     if str(音色) in ("anna", "claire", "diana", "alex", "bella", "benjamin", "charles", "david"):
         音 = str(音色)
     体 = json.dumps({
         "model": 模型,
         "input": 文本,
-        "voice": "%s:%s" % (模型, 音),
+        "voice": (音 if uri else "%s:%s" % (模型, 音)),
         "response_format": "mp3",
     }, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
