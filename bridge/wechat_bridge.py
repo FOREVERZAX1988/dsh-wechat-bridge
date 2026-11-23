@@ -665,20 +665,13 @@ def _窗口置前(hwnd):
         return False
 
 
-def 发语音(聊天, 文本, 音色=None):
-    """发一条真语音条：TTS 合成 → 播进 CABLE Input → 按住右 Alt 让微信录音 → 松开发送。
-    返回 (ok, 说明)。"""
+def 发语音文件(聊天, wav, 音色=""):
+    """把现成的 wav 发成微信语音条（RVC 换声后的音频也走这条）。
+    播进 CABLE Input + 按住右 Alt 录音 + 松开发送。"""
     import win32api
     import win32con
     import win32gui
 
-    wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
-    if not 音色:
-        音色 = 本轮语气表.get(聊天) or _猜语气(文本)
-        音色 = "萌" if "萌" in str(音色) else "御姐"
-        log("语音音色：%s（这一轮的语气）" % 音色)
-    if not 合成语音(文本, wav, 音色):
-        return False, "合成失败"
     try:
         import wave as _wave
 
@@ -741,7 +734,7 @@ def 发语音(聊天, 文本, 音色=None):
                     if ct <= 0 or time.time() - ct < 30:
                         globals()["_最后语音时刻"] = time.time()
                         _语音时刻[聊天] = time.time()
-                        log("语音已发出（%.1f 秒）：%s" % (秒, 文本[:20]))
+                        log("语音已发出（%.1f 秒）：%s" % (秒, os.path.basename(str(wav))[:24]))
                         return True, "已发出 %.1f 秒语音" % 秒
         except Exception:
             pass
@@ -749,7 +742,7 @@ def 发语音(聊天, 文本, 音色=None):
     globals()["_最后语音时刻"] = time.time()
     _语音时刻[聊天] = time.time()
     # 库里没确认也别当失败：录音已经播完并松手了，微信这时候基本已经发出去了
-    log("语音：库里没确认，但已播完并松手（按成功算）：%s" % 文本[:20])
+    log("语音：库里没确认，但已播完并松手（按成功算）：%s" % os.path.basename(str(wav))[:24])
     return True, "已发出 %.1f 秒语音（未在库里确认）" % 秒
 
 
@@ -1044,8 +1037,18 @@ def 读链接(url, 最多=900):
         })
         t0 = time.time()
         with urllib.request.urlopen(请求, timeout=15) as r:
-            原文 = r.read().decode("utf-8", errors="replace")
-        log("读链接：%s（%d 字节，%.1fs）" % (u[:60], len(原文), time.time() - t0))
+            原始 = r.read()
+            编码 = str(r.headers.get("content-encoding") or "").lower()
+            if "gzip" in 编码:
+                import gzip as _gz
+
+                原始 = _gz.decompress(原始)
+            elif "deflate" in 编码:
+                import zlib as _zl
+
+                原始 = _zl.decompress(原始, -15)
+            原文 = 原始.decode("utf-8", errors="replace")
+        log("读链接：%s（%d 字节，%.1fs%s）" % (u[:60], len(原文), time.time() - t0, "，已解压" if 编码 else ""))
     except Exception as e:
         log("读链接失败：%s ｜ %r" % (u[:60], e))
         return ""
@@ -1279,6 +1282,17 @@ def 收集表情包(图片路径, 来自=""):
     except Exception:
         pass
     return True
+
+def 发语音(聊天, 文本, 音色=None):
+    """合成一句并发成语音条。"""
+    wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
+    if not 音色:
+        音色 = 本轮语气表.get(聊天) or _猜语气(文本)
+        音色 = "萌" if "萌" in str(音色) else "御姐"
+        log("语音音色：%s（这一轮的语气）" % 音色)
+    if not 合成语音(文本, wav, 音色):
+        return False, "合成失败"
+    return 发语音文件(聊天, wav, 音色)
 
 def 人类延迟(text, 第几条=0):
     """发这条之前该等多久（秒）。按字数估"打字时间" + 随机抖动。"""
