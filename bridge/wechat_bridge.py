@@ -3284,27 +3284,35 @@ def main():
                     log("wxgf 转码失败：", repr(e))
                 return ""
 
-            for 轮 in range(3):
-                for tier in ("best", "thumb"):
-                    p = None
-                    try:
-                        p = 媒体["下载器"].download_image(
-                            username, local_id, save_dir=folder, tier=tier, shard=msg.get("shard")
-                        )
-                    except Exception as e:
-                        log("图片落盘失败（tier=%s）：%r" % (tier, e))
-                    if p and os.path.isfile(p) and os.path.getsize(p) > 0:
-                        if str(p).lower().endswith(".wxgf"):
-                            q = _转wxgf(p)
-                            if q:
-                                log("图片落盘（wxgf→jpg）：%s" % q)
-                                return q
-                            continue
-                        log("图片落盘：%s" % p)
-                        return p
-                if 轮 < 2:
+            def _拿(tier):
+                try:
+                    p = 媒体["下载器"].download_image(
+                        username, local_id, save_dir=folder, tier=tier, shard=msg.get("shard")
+                    )
+                except Exception as e:
+                    log("图片落盘失败（tier=%s）：%r" % (tier, e))
+                    return None
+                if not (p and os.path.isfile(p) and os.path.getsize(p) > 0):
+                    return None
+                if str(p).lower().endswith(".wxgf"):
+                    q = _转wxgf(p)
+                    return q or None
+                return p
+
+            # 只追「best」：thumb 是缩略图，宽高可能只剩四分之一，字全糊了 ——
+            # 2026-11-23 主人说「图片看不全」就是这个原因（490×66 的图只拿到 118×66）。
+            for 轮 in range(6):
+                p = _拿("best")
+                if p:
+                    log("图片落盘（原图）：%s" % p)
+                    return p
+                if 轮 < 5:
                     time.sleep(1.5)
-            log("图片落盘：三次都没取到（local_id=%s，微信可能还没下完）" % local_id)
+            p = _拿("thumb")
+            if p:
+                log("图片落盘（只有缩略图，细节会丢）：%s" % p)
+                return p
+            log("图片落盘：原图和缩略图都没取到（local_id=%s）" % local_id)
             return None
         except Exception as e:
             log("图片落盘失败：", repr(e))
