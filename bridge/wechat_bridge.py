@@ -668,6 +668,111 @@ def 刷新朋友圈(滚几屏=3):
     time.sleep(2)
     return True
 
+def _edge路径():
+    候选 = [
+        os.path.join(os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+    ]
+    for p in 候选:
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def 用Edge取正文(url, 最多=900, 等毫秒=8000):
+    """本机 Edge 无头跑一遍，等 JS 执行完把 DOM 抓回来。前端渲染的网页只有这条能读到。"""
+    edge = _edge路径()
+    if not edge:
+        log("没找到 Edge，跳过无头渲染")
+        return ""
+    import tempfile
+
+    配置目录 = os.path.join(tempfile.gettempdir(), "dsh_edge_%d" % int(time.time() * 1000))
+    进程 = None
+    try:
+        t0 = time.time()
+        进程 = subprocess.Popen(
+            [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+             "--disable-extensions", "--mute-audio",
+             "--user-data-dir=" + 配置目录, "--virtual-time-budget=%d" % int(等毫秒), "--dump-dom", url],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            输出, _ = 进程.communicate(timeout=25)
+        except subprocess.TimeoutExpired:
+            进程.kill()
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(进程.pid)],
+                           capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            log("Edge 超时（25 秒），已杀掉：%s" % url[:50])
+            return ""
+        原文 = (输出 or b"").decode("utf-8", errors="replace")
+        log("Edge 取正文：%s（%d 字节，%.1fs）" % (url[:50], len(原文), time.time() - t0))
+    except Exception as e:
+        log("Edge 取正文失败：%s ｜ %r" % (url[:50], e))
+        return ""
+    finally:
+        try:
+            import shutil as _sh
+
+            _sh.rmtree(配置目录, ignore_errors=True)
+        except Exception:
+            pass
+    if not 原文:
+        return ""
+    体 = re.sub(r"<script.*?</script>", " ", 原文, flags=re.S)
+    体 = re.sub(r"<style.*?</style>", " ", 体, flags=re.S)
+    体 = re.sub(r"<(nav|header|footer|svg).*?</\1>", " ", 体, flags=re.S)
+    体 = re.sub(r"<[^>]+>", " ", 体)
+    体 = html.unescape(re.sub(r"\s+", " ", 体)).strip()
+    if len(体) > 最多:
+        体 = 体[:最多] + "…"
+    return 体
+
+def 网页截图(url, 宽=1280, 高=1800):
+    """用本机 Edge 无头给网页拍一张图，返回本地路径（给视觉模型看）。
+    适合「文字取不到但图上有东西」的页面：海报、表格、评论区。"""
+    edge = _edge路径()
+    if not edge:
+        return ""
+    import tempfile
+
+    目录 = os.path.join(HOME_DIR, "wechat-inbound", "web")
+    os.makedirs(目录, exist_ok=True)
+    路径 = os.path.join(目录, "web_%d.png" % int(time.time() * 1000))
+    配置目录 = os.path.join(tempfile.gettempdir(), "dsh_edge_%d" % int(time.time() * 1000))
+    进程 = None
+    try:
+        进程 = subprocess.Popen(
+            [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+             "--hide-scrollbars", "--mute-audio",
+             "--user-data-dir=" + 配置目录, "--virtual-time-budget=8000",
+             "--window-size=%d,%d" % (int(宽), int(高)),
+             "--screenshot=" + 路径, url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            进程.communicate(timeout=25)
+        except subprocess.TimeoutExpired:
+            进程.kill()
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(进程.pid)],
+                           capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        log("网页截图失败：%r" % (e,))
+        return ""
+    finally:
+        try:
+            import shutil as _sh
+
+            _sh.rmtree(配置目录, ignore_errors=True)
+        except Exception:
+            pass
+    if os.path.exists(路径) and os.path.getsize(路径) > 5000:
+        log("网页截图：%s（%d 字节）" % (url[:50], os.path.getsize(路径)))
+        return 路径
+    return ""
+
 def 读链接(url, 最多=900):
     """把网页正文抓下来（公众号文章走 js_content，普通网页就去标签）。
     返回「标题\n正文节选」，失败返回空串。"""
@@ -705,6 +810,13 @@ def 读链接(url, 最多=900):
         正文 = re.sub(r"<(nav|header|footer).*?</\1>", " ", 正文, flags=re.S)
     正文 = re.sub(r"<[^>]+>", " ", 正文)
     正文 = html.unescape(re.sub(r"\s+", " ", 正文)).strip()
+    # 网页是前端渲染的（大众点评、知乎、小红书那种），普通请求只拿到一个空壳 ——
+    # 交给本机 Edge 无头模式，等 JS 跑完再取 DOM（2026-11-23 主人说「突然打不开链接」就是这类）
+    if len(正文) < 200:
+        壳 = 用Edge取正文(u, 最多)
+        if 壳:
+            正文 = 壳
+            标题 = 标题 or "（无标题）"
     if not 正文:
         return ""
     if len(正文) > 最多:
