@@ -3889,11 +3889,22 @@ def main():
         s2 = re.sub(r"<[^>]{1,300}>", " ", s)
         return " ".join(html.unescape(s2).split())
 
+    _进程启动时刻 = time.time()
+
     def on_message(msg, listener):
         try:
             username = msg.get("username") or ""
             if not username:
                 return
+            # 冷启动防刷屏：进程刚起来的前 10 分钟，只接 2 分钟内的新消息。
+            # 起因是 2026-11-24 系统时钟突然倒退 12 小时，积压的一堆群消息被当成「新消息」
+            # 一股脑转进 DSH，两个群瞬间被刷屏。
+            try:
+                _ct = float(msg.get("create_time") or 0)
+                if _ct and (time.time() - _进程启动时刻) < 600 and (time.time() - _ct) > 120:
+                    return
+            except Exception:
+                pass
             mtype = msg.get("type") or ""
             raw = msg.get("content") or ""
             图片待下 = ""
