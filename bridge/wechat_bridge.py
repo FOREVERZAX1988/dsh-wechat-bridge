@@ -3608,6 +3608,7 @@ def main():
             mtype = msg.get("type") or ""
             raw = msg.get("content") or ""
             图片待下 = ""
+            网页图 = ""   # 链接正文抓不到时，整页截图交给视觉模型
             图片类型 = ""
             if mtype == "图片":
                 content = "（发来一张图片）"
@@ -3660,6 +3661,9 @@ def main():
                             if 正文:
                                 content += "（我抓到了这个链接的正文——\n%s\n）" % 正文
                             else:
+                                网页图 = 网页截图(链接)
+                                if 网页图:
+                                    content += "（正文抓不到，我截了整页图，看下面的图）"
                                 host = re.match(r"https?://([^/]+)", 链接)
                                 content += "（链接来自 %s，正文没抓到，可能需要登录或反爬）" % (host.group(1) if host else "网页")
             elif mtype in ("视频", "视频号"):
@@ -3810,6 +3814,9 @@ def main():
                         图片路径 = [p]
                     else:
                         content = _看图并替换(content, p, 图片类型)
+
+            if 网页图 and 网页图 not in 图片路径:
+                图片路径.append(网页图)
 
             LAST_CHAT["chat"] = chat
             LAST_CHAT["ts"] = time.time()
