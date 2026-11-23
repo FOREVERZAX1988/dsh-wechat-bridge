@@ -421,6 +421,78 @@ def 克隆音色(音频路径, 名字, 参考文本=""):
     log("克隆音色成功：%s → %s" % (名字, uri[:40]))
     return uri, "好了：%s" % 名字
 
+# ---------- 全本地链路：SAPI 合成 + RVC 换声（零成本，一条 40~70 秒） ----------
+_RVC根 = os.path.join(os.path.expanduser("~"), ".dsh", "rvc")
+RVC_VENV = os.path.join(os.path.dirname(_RVC根), "rvc-venv", "Scripts", "python.exe")
+RVC_脚本 = os.path.join(_RVC根, "rvc_convert.py")
+RVC_模型 = os.path.join(_RVC根, "model", "model.pth")
+RVC_索引 = os.path.join(_RVC根, "model", "model.index")
+
+
+def 本地SAPI合成(文本, 输出路径):
+    """用 Windows 自带的中文语音合成，整条链路不出网、不花钱。"""
+    try:
+        import win32com.client
+
+        语音 = win32com.client.Dispatch("SAPI.SpVoice")
+        try:
+            for v in 语音.GetVoices():
+                if "Chinese" in str(v.GetDescription()) or "中文" in str(v.GetDescription()) or "Huihui" in str(v.GetDescription()):
+                    语音.Voice = v
+                    break
+        except Exception:
+            pass
+        流 = win32com.client.Dispatch("SAPI.SpFileStream")
+        流.Open(输出路径, 3)
+        语音.AudioOutputStream = 流
+        语音.Speak(文本)
+        流.Close()
+        return 输出路径 if os.path.exists(输出路径) and os.path.getsize(输出路径) > 2000 else None
+    except Exception as e:
+        log("本地 SAPI 合成失败：%r" % (e,))
+        return None
+
+
+def 本地RVC换声(输入wav, 输出路径, 半音=-4):
+    """把 SAPI 合成的声音过一遍 RVC，换成角色音色。1 核机器上一句 40~70 秒。"""
+    if not (os.path.exists(RVC_VENV) and os.path.exists(RVC_脚本) and os.path.exists(RVC_模型)):
+        log("RVC 环境不全，跳过换声")
+        return None
+    环境 = dict(os.environ)
+    环境["PYTHONIOENCODING"] = "utf-8"
+    命令 = [RVC_VENV, RVC_脚本, "--input", 输入wav, "--output", 输出路径, "--pitch", str(半音)]
+    if os.path.exists(RVC_索引):
+        命令 += ["--index", RVC_索引]
+    t0 = time.time()
+    try:
+        r = subprocess.run(命令, capture_output=True, timeout=300, env=环境,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if os.path.exists(输出路径) and os.path.getsize(输出路径) > 5000:
+            log("RVC 换声完成：%.0f 秒" % (time.time() - t0))
+            return 输出路径
+        log("RVC 换声没产物：%s" % (r.stderr or b"")[-200:].decode("utf-8", errors="replace"))
+    except Exception as e:
+        log("RVC 换声失败：%r" % (e,))
+    return None
+
+
+def 合成语音本地(文本, 输出路径, 音色="萌"):
+    干的 = os.path.join(tempfile.gettempdir(), "dsh_sapi_%d.wav" % int(time.time() * 1000))
+    原声 = 本地SAPI合成(文本, 干的)
+    if not 原声:
+        return None
+    换过 = 本地RVC换声(原声, 输出路径)
+    if not 换过:
+        log("RVC 失败，退回 SAPI 原声（机器人味）")
+        try:
+            import shutil as _sh
+
+            _sh.copyfile(原声, 输出路径)
+            return 输出路径
+        except Exception:
+            return None
+    return 换过
+
 def 合成语音硅基(文本, 输出路径, 音色="萌"):
     """硅基流动 CosyVoice2 在线合成：给个音色名，回来一段 mp3，再用 ffmpeg 转 wav。"""
     键, 模型 = 读硅基配置()
@@ -557,6 +629,11 @@ def 合成语音(文本, 输出路径, 音色=None):
     音色 = 音色 or 读音色配置()
     cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
     后端 = str(cfg.get("语音后端") or "硅基流动").strip()
+    if 后端 in ("本地", "本地RVC", "local"):
+        p = 合成语音本地(文, 输出路径, 音色)
+        if p:
+            return p
+        log("本地链路失败，退回云端")
     if 后端 != "edge":
         p = 合成语音硅基(文, 输出路径, 音色)
         if p:
