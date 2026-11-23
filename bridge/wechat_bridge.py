@@ -320,6 +320,8 @@ def 读音色配置():
 
 # 硅基流动（CosyVoice2）：一句 0.4~1.5 秒，比本地克隆快几十倍，也不用显卡
 硅基模型 = "FunAudioLLM/CosyVoice2-0.5B"
+# 按名字配的音高修正系数（<1 降调，1 不变）
+音高修正 = {"战场原": 0.81, "claire": 0.81, "diana": 0.67}
 硅基音色 = {
     "萌": "anna",
     "温柔": "claire",
@@ -393,6 +395,11 @@ def 克隆音色(音频路径, 名字, 参考文本=""):
             表 = {}
         表[str(名字)] = uri
         配置["克隆音色表"] = 表
+        参考 = 配置.get("克隆参考") or {}
+        if not isinstance(参考, dict):
+            参考 = {}
+        参考[str(名字)] = 音频路径
+        配置["克隆参考"] = 参考
         with open(os.path.join(HOME_DIR, "wechat-bridge-config.json"), "w", encoding="utf-8") as f:
             json.dump(配置, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -424,16 +431,43 @@ def 合成语音硅基(文本, 输出路径, 音色="萌"):
         "https://api.siliconflow.cn/v1/audio/speech", data=体, method="POST",
         headers={"Authorization": "Bearer " + 键, "Content-Type": "application/json"})
     mp3 = 输出路径 + ".mp3"
-    try:
+
+    def _取():
         with urllib.request.urlopen(req, timeout=45) as r:
-            音频 = r.read()
+            return r.read()
+
+    try:
+        音频 = _取()
+    except Exception as e:
+        # 克隆出来的 uri 会失效（实测过几次「Voice does not exist」）——有参考音频就现场重克隆再试一次
+        参考 = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}).get("克隆参考") or {}
+        路径 = 参考.get(str(音色)) if isinstance(参考, dict) else None
+        if not 路径 or not os.path.exists(路径):
+            log("硅基合成失败：%r" % (e,))
+            return None
+        log("克隆音色失效，用参考音频重克隆：%s" % str(音色))
+        新uri, 说 = 克隆音色(路径, str(音色), "")
+        if not 新uri:
+            log("重克隆失败：%s" % 说)
+            return None
+        体 = json.dumps({"model": 模型, "input": 文本, "voice": 新uri,
+                         "response_format": "mp3"}, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.siliconflow.cn/v1/audio/speech", data=体, method="POST",
+            headers={"Authorization": "Bearer " + 键, "Content-Type": "application/json"})
+        try:
+            音频 = _取()
+        except Exception as e2:
+            log("重克隆后合成仍失败：%r" % (e2,))
+            return None
+    try:
         if len(音频) < 2000:
             log("硅基合成返回太短：%d 字节" % len(音频))
             return None
         with open(mp3, "wb") as f:
             f.write(音频)
     except Exception as e:
-        log("硅基合成失败：%r" % (e,))
+        log("硅基写文件失败：%r" % (e,))
         return None
     ff = os.path.join(HOME_DIR, "wechat-bridge-runtime", "bin", "ffmpeg.exe")
     if not os.path.exists(ff):
@@ -481,7 +515,24 @@ def 合成语音边(os_文本, 输出路径, 音色="萌"):
     except Exception as e:
         log("ffmpeg 转 wav 失败：%r" % (e,))
         return None
-    return 输出路径 if os.path.exists(输出路径) and os.path.getsize(输出路径) > 2000 else None
+    if not (os.path.exists(输出路径) and os.path.getsize(输出路径) > 2000):
+        return None
+    # 硅基出来的音高普遍偏高：实测 claire 253Hz / diana 306Hz，而她原声 205Hz。
+    # 用 rubberband 降调（不改时长）——按名字配系数，1.0 表示不处理。
+    系数 = 音高修正.get(str(音色), 1.0)
+    if abs(系数 - 1.0) > 0.01:
+        低 = 输出路径 + ".low.wav"
+        try:
+            subprocess.run([ff, "-y", "-loglevel", "error", "-i", 输出路径,
+                            "-af", "rubberband=pitch=%.3f" % 系数, 低],
+                           capture_output=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if os.path.exists(低) and os.path.getsize(低) > 2000:
+                os.replace(低, 输出路径)
+                log("音高修正 %.2f：%s" % (系数, 音色))
+        except Exception as e:
+            log("音高修正失败：%r" % (e,))
+    return 输出路径
 
 
 def 合成语音(文本, 输出路径, 音色=None):
