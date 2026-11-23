@@ -113,8 +113,22 @@ PERSONA = os.environ.get("DSH_WECHAT_PERSONA") or (
 #   1) 回之前先"读+想"一会儿（按字数估，带随机抖动）
 #   2) 分段之间隔 1.5~4 秒
 #   3) 凌晨静默（默认 01:00-07:30），这段时间不接话
-静默_起 = float(os.environ.get("DSH_WECHAT_QUIET_FROM") or 1)      # 小时
-静默_止 = float(os.environ.get("DSH_WECHAT_QUIET_TO") or 7.5)       # 小时，7.5 = 07:30
+# 2026-11-24 收窄：原来 01:00–07:30，结果早上 6:40 主人还在群里说话、它一声不吭。
+# 真正的「半夜」只有 02:00–06:30；配置里也能覆盖（静默起 / 静默止）。
+def _读静默配置():
+    try:
+        cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+        起 = cfg.get("静默起")
+        止 = cfg.get("静默止")
+        return (float(起) if 起 not in (None, "") else None,
+                float(止) if 止 not in (None, "") else None)
+    except Exception:
+        return (None, None)
+
+
+_静起, _静止 = _读静默配置()
+静默_起 = float(os.environ.get("DSH_WECHAT_QUIET_FROM") or (_静起 if _静起 is not None else 2))   # 小时
+静默_止 = float(os.environ.get("DSH_WECHAT_QUIET_TO") or (_静止 if _静止 is not None else 6.5))    # 6.5 = 06:30
 
 
 def 静默时段(now=None):
