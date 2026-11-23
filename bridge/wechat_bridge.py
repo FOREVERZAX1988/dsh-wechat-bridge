@@ -318,6 +318,65 @@ def 读音色配置():
     return str(cfg.get("语音音色") or "萌").strip()
 
 
+# 硅基流动（CosyVoice2）：一句 0.4~1.5 秒，比本地克隆快几十倍，也不用显卡
+硅基模型 = "FunAudioLLM/CosyVoice2-0.5B"
+硅基音色 = {
+    "萌": "anna",
+    "温柔": "claire",
+    "知性": "diana",
+    "御姐": "claire",
+    "默认": "anna",
+}
+
+
+def 读硅基配置():
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    键 = str(cfg.get("硅基流动密钥") or "").strip() or str(os.environ.get("SILICONFLOW_API_KEY") or "").strip()
+    模型 = str(cfg.get("硅基模型") or "").strip() or 硅基模型
+    return 键, 模型
+
+
+def 合成语音硅基(文本, 输出路径, 音色="萌"):
+    """硅基流动 CosyVoice2 在线合成：给个音色名，回来一段 mp3，再用 ffmpeg 转 wav。"""
+    键, 模型 = 读硅基配置()
+    if not 键:
+        return None
+    音 = 硅基音色.get(str(音色), "anna")
+    if str(音色) in ("anna", "claire", "diana", "alex", "bella", "benjamin", "charles", "david"):
+        音 = str(音色)
+    体 = json.dumps({
+        "model": 模型,
+        "input": 文本,
+        "voice": "%s:%s" % (模型, 音),
+        "response_format": "mp3",
+    }, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.siliconflow.cn/v1/audio/speech", data=体, method="POST",
+        headers={"Authorization": "Bearer " + 键, "Content-Type": "application/json"})
+    mp3 = 输出路径 + ".mp3"
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            音频 = r.read()
+        if len(音频) < 2000:
+            log("硅基合成返回太短：%d 字节" % len(音频))
+            return None
+        with open(mp3, "wb") as f:
+            f.write(音频)
+    except Exception as e:
+        log("硅基合成失败：%r" % (e,))
+        return None
+    ff = os.path.join(HOME_DIR, "wechat-bridge-runtime", "bin", "ffmpeg.exe")
+    if not os.path.exists(ff):
+        ff = "ffmpeg"
+    try:
+        subprocess.run([ff, "-y", "-loglevel", "error", "-i", mp3, "-ar", "24000", "-ac", "1", 输出路径],
+                       capture_output=True, timeout=60,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        log("硅基转 wav 失败：%r" % (e,))
+        return None
+    return 输出路径 if os.path.exists(输出路径) and os.path.getsize(输出路径) > 2000 else None
+
 def 合成语音边(os_文本, 输出路径, 音色="萌"):
     """edge-tts（微软在线音色，免费不要 key）合成 mp3，再用 ffmpeg 转成 24k 单声道 wav。"""
     import asyncio
@@ -361,6 +420,12 @@ def 合成语音(文本, 输出路径, 音色=None):
     if not 文:
         return None
     音色 = 音色 or 读音色配置()
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    后端 = str(cfg.get("语音后端") or "硅基流动").strip()
+    if 后端 != "edge":
+        p = 合成语音硅基(文, 输出路径, 音色)
+        if p:
+            return p
     p = 合成语音边(文, 输出路径, 音色)
     if p:
         return p
