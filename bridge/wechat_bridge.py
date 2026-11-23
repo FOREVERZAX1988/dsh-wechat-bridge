@@ -773,12 +773,81 @@ def 网页截图(url, 宽=1280, 高=1800):
         return 路径
     return ""
 
+def _github令牌():
+    """从本地 git 仓库的 remote 地址里抠 token —— 私有仓库走网页会 404，走 API 才读得到。"""
+    try:
+        配置 = os.path.join(HOME_DIR, "vendor", "dsh-wechat-bridge", ".git", "config")
+        with open(配置, "r", encoding="utf-8", errors="replace") as f:
+            内容 = f.read()
+        m = re.search(r"https://([^:@\s]+):([^@\s]+)@github\.com", 内容)
+        if m:
+            return m.group(2)
+    except Exception:
+        pass
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+    return str(cfg.get("git令牌") or "").strip()
+
+
+def 读GitHub(url, 最多=1200):
+    """GitHub 仓库用 API 读：私有仓库网页会 404，API 带 token 才拿得到描述和 README。"""
+    import base64 as _b64
+
+    m = re.search(r"github\.com/([^/\s]+)/([^/?#\s]+)", url)
+    if not m:
+        return ""
+    主, 仓 = m.group(1), m.group(2)
+    if 仓.endswith(".git"):
+        仓 = 仓[:-4]
+    键 = _github令牌()
+    头 = {"User-Agent": "dsh-wechat-bridge", "Accept": "application/vnd.github+json"}
+    if 键:
+        头["Authorization"] = "Bearer " + 键
+    基础 = "https://api.github.com/repos/%s/%s" % (主, 仓)
+    段 = []
+    try:
+        req = urllib.request.Request(基础, headers=头)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            信 = json.loads(r.read().decode("utf-8") or "{}")
+        段.append("仓库：%s" % (信.get("full_name") or ("%s/%s" % (主, 仓))))
+        if 信.get("description"):
+            段.append("简介：%s" % str(信["description"])[:200])
+        元 = []
+        if 信.get("language"):
+            元.append("语言 %s" % 信["language"])
+        if 信.get("stargazers_count") is not None:
+            元.append("%s star" % 信["stargazers_count"])
+        if 信.get("updated_at"):
+            元.append("更新于 %s" % str(信["updated_at"])[:10])
+        if 信.get("private"):
+            元.append("私有仓库")
+        if 元:
+            段.append("｜".join(元))
+    except Exception as e:
+        log("GitHub API 读仓库失败：%r" % (e,))
+        return ""
+    try:
+        req = urllib.request.Request(基础 + "/readme", headers=头)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            读 = json.loads(r.read().decode("utf-8") or "{}")
+        文 = _b64.b64decode(读.get("content") or "").decode("utf-8", errors="replace")
+        文 = re.sub(r"\n{3,}", "\n\n", 文).strip()
+        if 文:
+            段.append("README 节选：\n" + 文[:最多])
+    except Exception:
+        pass
+    log("读GitHub：%s/%s（%d 段）" % (主, 仓, len(段)))
+    return "\n".join(段)
+
 def 读链接(url, 最多=900):
     """把网页正文抓下来（公众号文章走 js_content，普通网页就去标签）。
     返回「标题\n正文节选」，失败返回空串。"""
     u = str(url or "").strip()
     if not u.startswith("http"):
         return ""
+    if "github.com/" in u:
+        gh = 读GitHub(u, max(600, 最多))
+        if gh:
+            return gh
     try:
         import urllib.request
 
