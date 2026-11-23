@@ -301,6 +301,10 @@ def 语音转文字(聊天, local_id):
     "御姐": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "-12Hz", "rate": "-6%"},
     "台湾软": {"voice": "zh-TW-HsiaoChenNeural", "pitch": "-2Hz", "rate": "-3%"},
     "东北": {"voice": "zh-CN-liaoning-XiaobeiNeural", "pitch": "+6Hz", "rate": "+2%"},
+    # 战场原那种冷、慢、带点刺的调子：压音调 + 放慢 + 不加甜味
+    "战场原": {"voice": "zh-CN-XiaoxiaoNeural", "pitch": "-20Hz", "rate": "-10%"},
+    "战场原2": {"voice": "en-US-AvaMultilingualNeural", "pitch": "-16Hz", "rate": "-8%"},
+    "战场原3": {"voice": "zh-CN-XiaoyiNeural", "pitch": "-28Hz", "rate": "-12%"},
 }
 # 同一副面孔下可以随机换的嗓子（避免每次都一模一样）
 音色池 = {
