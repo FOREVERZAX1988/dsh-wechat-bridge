@@ -766,6 +766,28 @@ def _窗口置前(hwnd):
 
 
 def 发语音文件(聊天, wav, 音色=""):
+    """发语音条，失败重试一次 —— 这条链路（虚拟声卡+按右Alt录音）很不稳，一次不成十有八九没开始录。"""
+    最后说 = ""
+    for 第几次 in range(2):
+        ok, 说 = _发语音一次(聊天, wav, 音色)
+        if ok:
+            return ok, 说
+        最后说 = 说
+        if 第几次 == 0:
+            log("语音没发出去（%s），重建窗口重试一次" % 说)
+            _发语音GUI.pop("g", None)      # 丢掉缓存的 GUI 对象，下次重新校准
+            try:
+                import win32gui as _wg
+
+                h = _微信窗口句柄()
+                if h:
+                    _wg.ShowWindow(h, 3)     # SW_MAXIMIZE
+            except Exception:
+                pass
+            time.sleep(3)
+    return False, 最后说
+
+def _发语音一次(聊天, wav, 音色=""):
     """把现成的 wav 发成微信语音条（RVC 换声后的音频也走这条）。
     播进 CABLE Input + 按住右 Alt 录音 + 松开发送。"""
     import win32api
@@ -803,8 +825,19 @@ def 发语音文件(聊天, wav, 音色=""):
     except Exception as e:
         return False, "切会话失败：%r" % (e,)
     time.sleep(0.8)
+    # 输入框坐标：优先问 UIA 要（2026-11-24 修的坑 —— 主人这台是竖屏 1532×1726，
+    # 老的「窗口底部往上 110 像素」落在按钮区，点击落空，录音压根没开始，语音就发不出去）
     左, 上, 右, 下 = win32gui.GetWindowRect(hwnd)
     ix, iy = 左 + int((右 - 左) * 0.55), 下 - 110
+    try:
+        框 = gui.get_input_box()
+        if 框 and len(框) == 4:
+            bx1, by1, bx2, by2 = [int(v) for v in 框]
+            if bx2 > bx1 and by2 > by1:
+                ix, iy = (bx1 + bx2) // 2, (by1 + by2) // 2
+                log("语音输入框（UIA）：(%d, %d)" % (ix, iy))
+    except Exception:
+        pass
     win32api.SetCursorPos((ix, iy))
     time.sleep(0.2)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -824,14 +857,14 @@ def 发语音文件(聊天, wav, 音色=""):
     time.sleep(0.5)
     win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY | win32con.KEYEVENTF_KEYUP, 0)   # 松开 → 发送
     # 等库里出现这条语音（尽力而为：DB 有缓存时可能查不到，那就按「已播完」当作成功）
-    for _ in range(8):
+    for _ in range(24):   # 12 秒：微信写库有延迟，8 次×0.5 秒太急，导致「其实发出去了但被判失败」→ 重试重复发
         try:
             行们 = (_DB.get_messages(聊天, limit=6) or []) if _DB is not None else []
             if 行们:
                 最新 = max(行们, key=lambda r: float(r.get("create_time") or 0))
                 if str(最新.get("type") or "") == "语音":
                     ct = float(最新.get("create_time") or 0)
-                    if ct <= 0 or time.time() - ct < 30:
+                    if ct <= 0 or time.time() - ct < 90:
                         globals()["_最后语音时刻"] = time.time()
                         _语音时刻[聊天] = time.time()
                         log("语音已发出（%.1f 秒）：%s" % (秒, os.path.basename(str(wav))[:24]))
@@ -841,10 +874,77 @@ def 发语音文件(聊天, wav, 音色=""):
         time.sleep(0.5)
     globals()["_最后语音时刻"] = time.time()
     _语音时刻[聊天] = time.time()
-    # 库里没确认也别当失败：录音已经播完并松手了，微信这时候基本已经发出去了
-    log("语音：库里没确认，但已播完并松手（按成功算）：%s" % os.path.basename(str(wav))[:24])
-    return True, "已发出 %.1f 秒语音（未在库里确认）" % 秒
+    # 库里没确认：以前当成功，结果主人在微信里根本收不到（2026-11-24 连发 4 条只到 1 条）。
+    # 现在返回 False，让外层重试一次，再不行就如实报失败。
+    log("语音：库里没确认，按失败处理（外层层重试）：%s" % os.path.basename(str(wav))[:24])
+    return False, "发完但微信里没出现（录音可能没开始）"
 
+
+def 发文件(聊天, 路径):
+    """把文件直接发进微信（语音条发不出去时的退路）：剪贴板放文件 → 输入框 Ctrl+V → 回车。
+    微信对粘贴进来的文件会当成「文件消息」发出去，对方点一下就能听。"""
+    import win32api
+    import win32con
+    import win32gui
+    import win32clipboard
+
+    if not os.path.exists(路径):
+        return False, "文件不存在"
+    hwnd = _微信窗口句柄()
+    if not hwnd:
+        return False, "没找到微信窗口"
+    if not _窗口置前(hwnd):
+        return False, "微信置前失败"
+    gui = _发语音GUI.get("g")
+    if gui is None:
+        from wechatauto import WeChatGUI
+
+        gui = WeChatGUI()
+        _发语音GUI["g"] = gui
+    try:
+        if not gui._open_chat_and_settle(聊天):
+            return False, "切不到会话「%s」" % 聊天
+    except Exception as e:
+        return False, "切会话失败：%r" % (e,)
+    time.sleep(0.8)
+    try:
+        # 剪贴板放文件（CF_HDROP）
+        import struct
+
+        路径表 = str(路径).encode("gbk", errors="ignore") + b"\x00\x00"
+        drop = struct.pack("IiiII", 20, 0, 0, 0, 1) + struct.pack("I", 0) + 路径表
+        整个 = struct.pack("IiiII", 20, 0, 0, 0, 1) + struct.pack("I", 0) + 路径表
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_HDROP, 整个)
+        win32clipboard.CloseClipboard()
+    except Exception as e:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+        return False, "剪贴板放文件失败：%r" % (e,)
+    time.sleep(0.5)
+    # 点输入框 → Ctrl+V → 回车
+    左, 上, 右, 下 = win32gui.GetWindowRect(hwnd)
+    win32api.SetCursorPos((左 + int((右 - 左) * 0.55), 下 - 110))
+    time.sleep(0.2)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.1)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.5)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+    win32api.keybd_event(0x56, 0, 0, 0)          # V
+    time.sleep(0.1)
+    win32api.keybd_event(0x56, 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+    time.sleep(1.5)
+    win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+    time.sleep(0.1)
+    win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+    time.sleep(1.5)
+    log("已发文件（尽力）：%s → %s" % (os.path.basename(路径)[:28], 聊天))
+    return True, "已尝试发文件"
 
 def 读朋友圈(条数=8):
     """读本地朋友圈缓存（sns.db 的 SnsTimeLine）。没缓存就返回空串。"""
