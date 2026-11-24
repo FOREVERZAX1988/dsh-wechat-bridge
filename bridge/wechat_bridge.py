@@ -778,6 +778,29 @@ def _窗口置前(hwnd):
         return False
 
 
+def _取GUI(hwnd=None):
+    """拿一个校准过的 WeChatGUI。屏幕分辨率会变（实测 1536×864 → 1532×1726 → 1230×1180），
+    窗口尺寸一变，之前算好的比例坐标就全错，所以尺寸变了就丢掉重建成新的（会重新校准）。"""
+    import win32gui
+
+    try:
+        h = hwnd or _微信窗口句柄()
+        距 = win32gui.GetWindowRect(h) if h else None
+    except Exception:
+        距 = None
+    旧 = _发语音GUI.get("g")
+    旧距 = _发语音GUI.get("距")
+    if 旧 is not None and 距 == 旧距:
+        return 旧
+    from wechatauto import WeChatGUI
+
+    gui = WeChatGUI()
+    _发语音GUI["g"] = gui
+    _发语音GUI["距"] = 距
+    if 旧 is not None:
+        log("窗口尺寸变了（%s → %s），重建 GUI 并重新校准" % (旧距, 距))
+    return gui
+
 def 发语音文件(聊天, wav, 音色=""):
     """发语音条，失败重试一次 —— 这条链路（虚拟声卡+按右Alt录音）很不稳，一次不成十有八九没开始录。"""
     最后说 = ""
@@ -826,12 +849,7 @@ def _发语音一次(聊天, wav, 音色=""):
         return False, "没找到微信窗口"
     if not _窗口置前(hwnd):
         return False, "微信置前失败"
-    gui = _发语音GUI.get("g")
-    if gui is None:
-        from wechatauto import WeChatGUI
-
-        gui = WeChatGUI()
-        _发语音GUI["g"] = gui
+    gui = _取GUI(hwnd)
     try:
         if not gui._open_chat_and_settle(聊天):
             return False, "切不到会话「%s」" % 聊天
@@ -911,12 +929,7 @@ def 发文件(聊天, 路径):
         return False, "没找到微信窗口"
     if not _窗口置前(hwnd):
         return False, "微信置前失败"
-    gui = _发语音GUI.get("g")
-    if gui is None:
-        from wechatauto import WeChatGUI
-
-        gui = WeChatGUI()
-        _发语音GUI["g"] = gui
+    gui = _取GUI(hwnd)
     try:
         if not gui._open_chat_and_settle(聊天):
             return False, "切不到会话「%s」" % 聊天
