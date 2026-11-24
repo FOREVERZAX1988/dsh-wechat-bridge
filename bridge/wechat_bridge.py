@@ -3445,7 +3445,9 @@ def main():
                             time.sleep(1.5)
                     # 有人点歌、它又没主动哼 —— 桥接兜底补一条哼唱语音，别让「不会唱」把话堵死。
                     # 注意别再重复：发语音自己会记 _语音时刻，20 秒内这个聊天已经有语音就不补。
-                    if not 语音段们:
+                    # 2026-11-24 关掉「兜底哼唱」：它就是把歌词念一遍，过完 RVC 是「机械音」，
+                    # 主人明确说难听。要开回来设配置 兜底哼唱=true。
+                    if not 语音段们 and str((_读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}).get("兜底哼唱")) == "True":
                         请 = _唱歌请求.get(chat)
                         if (请 and time.time() - 请 < 180
                                 and time.time() - _语音时刻.get(chat, 0) > 20):
