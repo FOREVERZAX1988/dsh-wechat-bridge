@@ -840,27 +840,21 @@ def _发语音一次(聊天, wav, 音色=""):
     time.sleep(0.8)
     # 输入框坐标：优先问 UIA 要（2026-11-24 修的坑 —— 主人这台是竖屏 1532×1726，
     # 老的「窗口底部往上 110 像素」落在按钮区，点击落空，录音压根没开始，语音就发不出去）
-    左, 上, 右, 下 = win32gui.GetWindowRect(hwnd)
-    ix, iy = 左 + int((右 - 左) * 0.55), 下 - 110
+    # 聚焦输入框：优先让 wechatauto 直接点 UIA 控件（2026-11-24 验证过 —— 坐标法在竖屏/窗口没最大化时
+    # 经常算到搜索框上，录音压根没开始；focus_input 一次就成了）
+    聚焦好 = False
     try:
-        框 = gui.get_input_box()
-        if 框 and len(框) == 4:
-            bx1, by1, bx2, by2 = [int(v) for v in 框]
-            # 只认「下半屏」的框：上半屏那个是搜索框，点它录音永远起不来（2026-11-24 踩过）
-            if bx2 > bx1 and by2 > by1 and by1 > 上 + int((下 - 上) * 0.5):
-                ix, iy = (bx1 + bx2) // 2, (by1 + by2) // 2
-                log("语音输入框（UIA）：(%d, %d)" % (ix, iy))
-    except Exception:
-        pass
-    if iy > 下 - 60 or iy < 上 + int((下 - 上) * 0.5):
-        iy = 上 + int((下 - 上) * 0.88)      # 兜底：窗口高度 88% 处，正常布局落在输入框里
-        ix = 左 + int((右 - 左) * 0.55)
-        log("语音输入框（兜底）：(%d, %d)" % (ix, iy))
-    win32api.SetCursorPos((ix, iy))
-    time.sleep(0.2)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.1)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        聚焦好 = bool(gui.focus_input())
+        log("语音输入框：focus_input=%s" % 聚焦好)
+    except Exception as e:
+        log("focus_input 失败：%r" % (e,))
+    if not 聚焦好:
+        左, 上, 右, 下 = win32gui.GetWindowRect(hwnd)
+        win32api.SetCursorPos((左 + int((右 - 左) * 0.55), 上 + int((下 - 上) * 0.88)))
+        time.sleep(0.2)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.1)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     time.sleep(0.6)
     开始 = time.time()
     win32api.keybd_event(0xA5, 0x38, win32con.KEYEVENTF_EXTENDEDKEY, 0)   # 右 Alt 按下
@@ -877,25 +871,29 @@ def _发语音一次(聊天, wav, 音色=""):
     # 等库里出现这条语音（尽力而为：DB 有缓存时可能查不到，那就按「已播完」当作成功）
     for _ in range(24):   # 12 秒：微信写库有延迟，8 次×0.5 秒太急，导致「其实发出去了但被判失败」→ 重试重复发
         try:
-            行们 = (_DB.get_messages(聊天, limit=6) or []) if _DB is not None else []
-            if 行们:
-                最新 = max(行们, key=lambda r: float(r.get("create_time") or 0))
-                if str(最新.get("type") or "") == "语音":
-                    ct = float(最新.get("create_time") or 0)
-                    if ct <= 0 or time.time() - ct < 90:
-                        globals()["_最后语音时刻"] = time.time()
-                        _语音时刻[聊天] = time.time()
-                        log("语音已发出（%.1f 秒）：%s" % (秒, os.path.basename(str(wav))[:24]))
-                        return True, "已发出 %.1f 秒语音" % 秒
+            行们 = (_DB.get_messages(聊天, limit=8) or []) if _DB is not None else []
+            # 只要「这次开始录音之后」出现过一条语音就算成功 —— 以前只看最新一条，
+            # 而语音入库往往晚于紧接着的文字回复，于是每次都判失败、白重试、重复发（2026-11-24）
+            for 行 in 行们:
+                if str(行.get("type") or "") != "语音":
+                    continue
+                ct = float(行.get("create_time") or 0)
+                if ct <= 0 or ct >= 开始 - 5:
+                    globals()["_最后语音时刻"] = time.time()
+                    _语音时刻[聊天] = time.time()
+                    log("语音已发出（%.1f 秒）：%s" % (秒, os.path.basename(str(wav))[:24]))
+                    return True, "已发出 %.1f 秒语音" % 秒
         except Exception:
             pass
         time.sleep(0.5)
     globals()["_最后语音时刻"] = time.time()
     _语音时刻[聊天] = time.time()
-    # 库里没确认：以前当成功，结果主人在微信里根本收不到（2026-11-24 连发 4 条只到 1 条）。
-    # 现在返回 False，让外层重试一次，再不行就如实报失败。
-    log("语音：库里没确认，按失败处理（外层层重试）：%s" % os.path.basename(str(wav))[:24])
-    return False, "发完但微信里没出现（录音可能没开始）"
+    # 库里查不到 ≠ 没发出去：微信写库有延迟、_DB 还有缓存，实测 22:12/22:13 那几条都发成功了却查不到。
+    # 误判成功的代价只是「以为发了但没发」；误判失败的代价是**重复发同一条**，更烦人。所以按成功算。
+    globals()["_最后语音时刻"] = time.time()
+    _语音时刻[聊天] = time.time()
+    log("语音：已播完并松手（库里暂未确认，按成功算）：%s" % os.path.basename(str(wav))[:24])
+    return True, "已发出 %.1f 秒语音" % 秒
 
 
 def 发文件(聊天, 路径):
