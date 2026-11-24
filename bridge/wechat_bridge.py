@@ -906,6 +906,84 @@ def 晚安对象():
     return 去重
 
 
+_早安模板 = [
+    "鱼鱼醒啦～{n}早安，今天也顺顺利利的。",
+    "早上好呀{n}～鱼鱼已经在游了，今天想干点啥？",
+    "{n}早安～鱼鱼伸了个懒腰，新的一天开始咯。",
+    "天亮了{n}，鱼鱼来报到，今天也一起加油吧。",
+    "早安{n}～昨晚睡得还好吗？鱼鱼精神得很捏。",
+    "{n}早上好，鱼鱼把今天的太阳先游了一圈。",
+    "鱼鱼起床啦～{n}早安，别赖床哦。",
+    "早上好{n}，鱼鱼在这儿等{你}呢～",
+]
+_早安记录 = os.path.join(os.path.expanduser("~"), ".dsh", "wechat-goodmorning.json")
+
+
+def _问候已发(记录路径):
+    try:
+        记 = _读json(记录路径, {}) or {}
+        return str(记.get("日期") or "") == time.strftime("%Y-%m-%d")
+    except Exception:
+        return False
+
+
+def _记问候(记录路径, 发了几个):
+    try:
+        with open(记录路径, "w", encoding="utf-8") as f:
+            json.dump({"日期": time.strftime("%Y-%m-%d"), "发了": 发了几个,
+                       "时刻": time.strftime("%H:%M:%S")}, f, ensure_ascii=False)
+    except Exception as e:
+        log("写问候记录失败：%r" % (e,))
+
+
+def 读配置晚安点():
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+    return cfg.get("晚安时刻") or 静默_起
+
+
+def 读配置早安点():
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+    return cfg.get("早安时刻") or 7.5
+
+def 问候线程(类型="晚安"):
+    """统一的定时问候：到点给群和好友各发一句，文案随机、按天去重。"""
+    记录 = _晚安记录 if 类型 == "晚安" else _早安记录
+    模板 = _晚安模板 if 类型 == "晚安" else _早安模板
+    键开 = "晚安" if 类型 == "晚安" else "早安"
+    键时 = "晚安时刻" if 类型 == "晚安" else "早安时刻"
+    默认时 = 静默_起 if 类型 == "晚安" else 7.5
+    while True:
+        try:
+            cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+            if cfg.get(键开) is not False:
+                时 = float(cfg.get(键时) if cfg.get(键时) not in (None, "") else 默认时)
+                现在 = time.localtime()
+                if 现在.tm_hour == int(时) and 现在.tm_min < 5 and not _问候已发(记录):
+                    _记问候(记录, 0)
+                    对象 = 晚安对象()
+                    log("%s播报开始：%d 个对象" % (类型, len(对象)))
+                    发了 = 0
+                    for 名 in 对象:
+                        群聊 = 名.endswith("@chatroom") or 名 in [str(x) for x in (cfg.get("活跃群") or [])]
+                        句 = random.choice(模板).replace("{n}", "你们" if 群聊 else "你").replace("{你}", "你们" if 群聊 else "你")
+                        try:
+                            r = http_json("/dsh-wechat-bridge/send", {"聊天": 名, "文本": 句})
+                            好 = bool(r.get("ok"))
+                            说明 = str(r.get("说") or "")
+                        except Exception as e:
+                            好, 说明 = False, repr(e)
+                        if 好:
+                            发了 += 1
+                            log("%s → %s：%s" % (类型, 名, 句[:18]))
+                        else:
+                            log("%s失败 → %s：%s" % (类型, 名, 说明[:60]))
+                        time.sleep(2.0)
+                    _记问候(记录, 发了)
+                    log("%s播报完成：成功 %d / %d" % (类型, 发了, len(对象)))
+        except Exception as e:
+            log("%s线程出错：%r" % (类型, e))
+        time.sleep(60)
+
 def 晚安线程():
     """每分钟看一眼：到了「晚安时刻」且今天还没发过，就给所有人发一句。"""
     while True:
@@ -4618,8 +4696,10 @@ def main():
     except Exception:
         pass
     try:
-        threading.Thread(target=晚安线程, daemon=True).start()
-        log("晚安线程已启动（%.1f 点触发）" % 静默_起)
+        threading.Thread(target=问候线程, kwargs={"类型": "晚安"}, daemon=True).start()
+        threading.Thread(target=问候线程, kwargs={"类型": "早安"}, daemon=True).start()
+        log("问候线程已启动（晚安 %s 点、早安 %s 点）" % (
+            读配置晚安点(), 读配置早安点()))
     except Exception:
         pass
 
