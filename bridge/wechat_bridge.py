@@ -477,8 +477,17 @@ def 本地RVC换声(输入wav, 输出路径, 半音=-4):
 
 
 def 合成语音本地(文本, 输出路径, 音色="萌"):
-    干的 = os.path.join(tempfile.gettempdir(), "dsh_sapi_%d.wav" % int(time.time() * 1000))
-    原声 = 本地SAPI合成(文本, 干的)
+    干的 = os.path.join(tempfile.gettempdir(), "dsh_base_%d.wav" % int(time.time() * 1000))
+    # 底声可选：sapi（真本地，但念经）/ edge（微软免费接口，自然，但仍算「不花钱」）
+    cfg0 = _读json(os.path.join(os.path.expanduser("~"), ".dsh", "wechat-bridge-config.json"), {})
+    底声 = str(cfg0.get("本地底声") or "edge").strip().lower()
+    原声 = None
+    if 底声 == "edge":
+        原声 = 合成语音边(文本, 干的, 音色)
+        if 原声:
+            log("本地链路底声：edge（自然，但不花钱）")
+    if not 原声:
+        原声 = 本地SAPI合成(文本, 干的)
     if not 原声:
         return None
     换过 = 本地RVC换声(原声, 输出路径)
