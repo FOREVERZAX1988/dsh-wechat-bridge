@@ -824,6 +824,123 @@ def _窗口置前(hwnd):
         return False
 
 
+# ---------- 晚安播报：到点给群和好友各发一句，文案每天随机 ----------
+_晚安模板 = [
+    "鱼鱼睡觉去啦～你也早点休息哈。",
+    "夜深了，鱼鱼先睡咯，你也早点歇着呀～",
+    "鱼鱼要去梦里游泳啦，你也别熬太晚哦。",
+    "今天到这儿啦，鱼鱼睡觉去，你也早点休息哈～",
+    "困了困了，鱼鱼先钻被窝了，你也早点睡呀。",
+    "鱼鱼下线睡觉咯～你也早点休息，明天见。",
+    "夜色正好，鱼鱼去睡了，你也别熬夜啦～",
+    "鱼鱼要睡啦，你也早点歇着，晚安好梦。",
+]
+_晚安记录 = os.path.join(os.path.expanduser("~"), ".dsh", "wechat-goodnight.json")
+
+
+def _晚安已发(今天):
+    try:
+        记 = _读json(_晚安记录, {}) or {}
+        return str(记.get("日期") or "") == 今天
+    except Exception:
+        return False
+
+
+def _记晚安(今天, 发了几个):
+    try:
+        with open(_晚安记录, "w", encoding="utf-8") as f:
+            json.dump({"日期": 今天, "发了": 发了几个, "时刻": time.strftime("%H:%M:%S")}, f, ensure_ascii=False)
+    except Exception as e:
+        log("写晚安记录失败：%r" % (e,))
+
+
+def 晚安对象():
+    """要发晚安的对象：活跃群 + 主人 + 最近三天有过消息的私聊（屏蔽名单除外）。"""
+    cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+    屏蔽 = set(str(x) for x in (cfg.get("屏蔽") or []))
+    对象 = []
+    已加 = set()
+
+    def _加(名):
+        名 = str(名 or "").strip()
+        if 名 and 名 not in 屏蔽 and 名 not in 已加:
+            已加.add(名)
+            对象.append(名)
+
+    try:
+        昵称表 = _DB.nickname_map() or {}
+    except Exception:
+        昵称表 = {}
+    for 群 in (cfg.get("活跃群") or []):
+        标识 = str(群).strip()
+        if not 标识:
+            continue
+        # 活跃群可能写成 wxid 或群名，统一换成群名（发送用名字更稳），群名相同的只发一次
+        名 = _DB.group_id_to_name(标识) if hasattr(_DB, "group_id_to_name") else 标识
+        _加(名 or 标识)
+    _加(str(cfg.get("主人显示名") or "").strip())
+    try:
+        now = time.time()
+        for s in (_DB.get_sessions() or []):
+            un = str(s.get("username") or "")
+            名 = re.sub(r"\s*remark$", "", str((昵称表 or {}).get(un) or "").strip())
+            if not un or "@chatroom" in un or un in ("filehelper", ""):
+                continue
+            if not 名 or 名 in 屏蔽 or 名 in 已加:
+                continue
+            try:
+                行们 = _DB.get_messages(un, limit=2) or []
+            except Exception:
+                continue
+            if not 行们:
+                continue
+            最新 = max(float(r.get("create_time") or 0) for r in 行们)
+            if now - 最新 < 3 * 86400:
+                对象.append(名)
+    except Exception as e:
+        log("晚安对象收集失败：%r" % (e,))
+    去重 = []
+    for 名 in 对象:
+        if 名 and 名 not in 去重:
+            去重.append(名)
+    return 去重
+
+
+def 晚安线程():
+    """每分钟看一眼：到了「晚安时刻」且今天还没发过，就给所有人发一句。"""
+    while True:
+        try:
+            cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+            开 = cfg.get("晚安", True)
+            if 开 is not False:
+                时 = float(cfg.get("晚安时刻") if cfg.get("晚安时刻") not in (None, "") else 静默_起)
+                现在 = time.localtime()
+                今天 = time.strftime("%Y-%m-%d", 现在)
+                if 现在.tm_hour == int(时) and 现在.tm_min < 5 and not _晚安已发(今天):
+                    _记晚安(今天, 0)      # 先占位，防止重复触发
+                    对象 = 晚安对象()
+                    log("晚安播报开始：%d 个对象" % len(对象))
+                    发了 = 0
+                    for 名 in 对象:
+                        句 = random.choice(_晚安模板)
+                        try:
+                            r = http_json("/dsh-wechat-bridge/send", {"聊天": 名, "文本": 句})
+                            好 = bool(r.get("ok"))
+                            说明 = str(r.get("说") or "")
+                        except Exception as e:
+                            好, 说明 = False, repr(e)
+                        if 好:
+                            发了 += 1
+                            log("晚安 → %s：%s" % (名, 句[:18]))
+                        else:
+                            log("晚安失败 → %s：%s" % (名, 说明[:60]))
+                        time.sleep(2.0)
+                    _记晚安(今天, 发了)
+                    log("晚安播报完成：成功 %d / %d" % (发了, len(对象)))
+        except Exception as e:
+            log("晚安线程出错：%r" % (e,))
+        time.sleep(60)
+
 def 确保RVC服务():
     """常驻换声服务：活着就别管，死了拉起来。心跳文件 10 秒内更新就算活着。"""
     任务目录 = os.path.join(_RVC根, "jobs")
@@ -4497,6 +4614,11 @@ def main():
     log("监听已启动（0.4 秒一轮）")
     try:
         threading.Thread(target=确保RVC服务, daemon=True).start()
+    except Exception:
+        pass
+    try:
+        threading.Thread(target=晚安线程, daemon=True).start()
+        log("晚安线程已启动（%.1f 点触发）" % 静默_起)
     except Exception:
         pass
 
