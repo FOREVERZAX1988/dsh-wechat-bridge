@@ -453,16 +453,29 @@ def 本地SAPI合成(文本, 输出路径):
         return None
 
 
-def 本地RVC换声(输入wav, 输出路径, 半音=-4):
-    """把 SAPI 合成的声音过一遍 RVC，换成角色音色。1 核机器上一句 40~70 秒。"""
-    if not (os.path.exists(RVC_VENV) and os.path.exists(RVC_脚本) and os.path.exists(RVC_模型)):
+def 本地RVC换声(输入wav, 输出路径, 半音=None):
+    """把底声过一遍 RVC，换成角色音色。1 核机器上一句 30~70 秒。
+    配置：RVC模型（目录名，默认 hutao）、RVC半音（默认 0，不压音高 —— 压了会显得平）。"""
+    cfg = _读json(os.path.join(os.path.expanduser("~"), ".dsh", "wechat-bridge-config.json"), {})
+    模型名 = str(cfg.get("RVC模型") or "hutao").strip()
+    模型目录 = os.path.join(_RVC根, "model_" + 模型名)
+    模型 = os.path.join(模型目录, 模型名 + ".pth")
+    索引 = os.path.join(模型目录, 模型名 + ".index")
+    if not os.path.exists(模型):
+        模型, 索引 = RVC_模型, RVC_索引      # 配错了退回默认模型
+    if 半音 is None:
+        try:
+            半音 = int(cfg.get("RVC半音") or 0)
+        except Exception:
+            半音 = 0
+    if not (os.path.exists(RVC_VENV) and os.path.exists(RVC_脚本) and os.path.exists(模型)):
         log("RVC 环境不全，跳过换声")
         return None
     环境 = dict(os.environ)
     环境["PYTHONIOENCODING"] = "utf-8"
-    命令 = [RVC_VENV, RVC_脚本, "--input", 输入wav, "--output", 输出路径, "--pitch", str(半音)]
-    if os.path.exists(RVC_索引):
-        命令 += ["--index", RVC_索引]
+    命令 = [RVC_VENV, RVC_脚本, "--model", 模型, "--input", 输入wav, "--output", 输出路径, "--pitch", str(半音)]
+    if os.path.exists(索引):
+        命令 += ["--index", 索引]
     t0 = time.time()
     try:
         r = subprocess.run(命令, capture_output=True, timeout=300, env=环境,
@@ -833,11 +846,16 @@ def _发语音一次(聊天, wav, 音色=""):
         框 = gui.get_input_box()
         if 框 and len(框) == 4:
             bx1, by1, bx2, by2 = [int(v) for v in 框]
-            if bx2 > bx1 and by2 > by1:
+            # 只认「下半屏」的框：上半屏那个是搜索框，点它录音永远起不来（2026-11-24 踩过）
+            if bx2 > bx1 and by2 > by1 and by1 > 上 + int((下 - 上) * 0.5):
                 ix, iy = (bx1 + bx2) // 2, (by1 + by2) // 2
                 log("语音输入框（UIA）：(%d, %d)" % (ix, iy))
     except Exception:
         pass
+    if iy > 下 - 60 or iy < 上 + int((下 - 上) * 0.5):
+        iy = 上 + int((下 - 上) * 0.88)      # 兜底：窗口高度 88% 处，正常布局落在输入框里
+        ix = 左 + int((右 - 左) * 0.55)
+        log("语音输入框（兜底）：(%d, %d)" % (ix, iy))
     win32api.SetCursorPos((ix, iy))
     time.sleep(0.2)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
