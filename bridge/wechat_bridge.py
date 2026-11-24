@@ -1301,9 +1301,15 @@ def 发语音(聊天, 文本, 音色=None):
     """合成一句并发成语音条。"""
     wav = os.path.join(tempfile.gettempdir(), "dsh_voice_%d.wav" % int(time.time()))
     if not 音色:
-        音色 = 本轮语气表.get(聊天) or _猜语气(文本)
-        音色 = "萌" if "萌" in str(音色) else "御姐"
-        log("语音音色：%s（这一轮的语气）" % 音色)
+        _cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {})
+        _固定 = str(_cfg.get("默认音色") or "").strip()
+        if _固定:
+            音色 = _固定
+            log("语音音色：%s（配置里定的固定音色）" % 音色)
+        else:
+            音色 = 本轮语气表.get(聊天) or _猜语气(文本)
+            音色 = "萌" if "萌" in str(音色) else "御姐"
+            log("语音音色：%s（这一轮的语气）" % 音色)
     if not 合成语音(文本, wav, 音色):
         return False, "合成失败"
     return 发语音文件(聊天, wav, 音色)
