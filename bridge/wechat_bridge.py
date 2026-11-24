@@ -471,6 +471,43 @@ def 本地RVC换声(输入wav, 输出路径, 半音=None):
     if not (os.path.exists(RVC_VENV) and os.path.exists(RVC_脚本) and os.path.exists(模型)):
         log("RVC 环境不全，跳过换声")
         return None
+    # 常驻服务优先：模型只在服务里加载一次，单条从 30~45 秒降到 8~12 秒
+    任务目录 = os.path.join(_RVC根, "jobs")
+    if os.path.isdir(任务目录):
+        try:
+            import uuid as _uuid
+
+            任务名 = "job_%s.json" % _uuid.uuid4().hex[:12]
+            任务路径 = os.path.join(任务目录, 任务名)
+            完成 = 输出路径 + ".done"
+            try:
+                os.remove(完成)
+            except Exception:
+                pass
+            参 = {"input": 输入wav, "output": 输出路径, "pitch": 半音,
+                  "index": 索引 if os.path.exists(索引) else "", "index_rate": 0.5}
+            with open(任务路径, "w", encoding="utf-8") as f:
+                json.dump(参, f, ensure_ascii=False)
+            t0 = time.time()
+            for _ in range(600):          # 最多等 120 秒
+                if os.path.exists(完成):
+                    break
+                time.sleep(0.2)
+            if os.path.exists(完成):
+                with open(完成, "r", encoding="utf-8", errors="replace") as f:
+                    结果 = f.read().strip()
+                try:
+                    os.remove(完成)
+                except Exception:
+                    pass
+                if 结果.startswith("ok") and os.path.exists(输出路径):
+                    log("RVC 常驻换声完成：%.1f 秒" % (time.time() - t0))
+                    return 输出路径
+                log("RVC 常驻失败：%s，改走一次性命令" % 结果[:80])
+            else:
+                log("RVC 常驻 120 秒没结果，改走一次性命令")
+        except Exception as e:
+            log("RVC 常驻投递异常：%r" % (e,))
     环境 = dict(os.environ)
     环境["PYTHONIOENCODING"] = "utf-8"
     命令 = [RVC_VENV, RVC_脚本, "--model", 模型, "--input", 输入wav, "--output", 输出路径, "--pitch", str(半音)]
@@ -777,6 +814,32 @@ def _窗口置前(hwnd):
         log("窗口置前失败：%r" % (e,))
         return False
 
+
+def 确保RVC服务():
+    """常驻换声服务：活着就别管，死了拉起来。心跳文件 10 秒内更新就算活着。"""
+    任务目录 = os.path.join(_RVC根, "jobs")
+    心跳 = os.path.join(任务目录, "serve.alive")
+    try:
+        os.makedirs(任务目录, exist_ok=True)
+        if os.path.exists(心跳) and (time.time() - os.path.getmtime(心跳)) < 10:
+            return True
+    except Exception:
+        pass
+    if not (os.path.exists(RVC_VENV) and os.path.exists(RVC_脚本)):
+        return False
+    try:
+        模型 = os.path.join(_RVC根, "model_hutao", "hutao.pth")
+        日志 = open(os.path.join(_RVC根, "serve.log"), "a", encoding="utf-8", errors="replace")
+        subprocess.Popen(
+            [RVC_VENV, RVC_脚本, "--serve", "--jobs", 任务目录, "--model", 模型],
+            stdout=日志, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | 0x00000008,   # DETACHED_PROCESS
+        )
+        log("RVC 常驻服务已拉起")
+        return True
+    except Exception as e:
+        log("拉起 RVC 服务失败：%r" % (e,))
+        return False
 
 def _取GUI(hwnd=None):
     """拿一个校准过的 WeChatGUI。屏幕分辨率会变（实测 1536×864 → 1532×1726 → 1230×1180），
@@ -4421,6 +4484,10 @@ def main():
     listener.add_all(on_message)
     listener.start()
     log("监听已启动（0.4 秒一轮）")
+    try:
+        threading.Thread(target=确保RVC服务, daemon=True).start()
+    except Exception:
+        pass
 
     load_memes()
 
