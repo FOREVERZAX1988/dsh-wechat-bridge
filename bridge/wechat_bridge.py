@@ -4378,7 +4378,74 @@ def main():
 
     _进程启动时刻 = time.time()
 
+    # ---------- 攒一攒再回：对方话没说完就别急着插嘴（2026-11-25 主人要求） ----------
+    缓冲锁 = threading.Lock()
+    缓冲 = {}          # chat -> {"msgs": [msg...], "last": 时间}
+
+    def _文本(msg):
+        try:
+            return clean_text(msg.get("content") or "")
+        except Exception:
+            return str(msg.get("content") or "")
+
+    def _等多久(msgs):
+        """最后一句像没说完就多等一会儿。"""
+        文本 = _文本(msgs[-1]).strip() if msgs else ""
+        等 = 4.0
+        if not 文本:
+            等 = 2.5                                   # 图片/表情包，没啥可等的
+        elif 文本.endswith(("，", "、", "…", "...,", ",", "～", "~", "——")):
+            等 = 9.0                                   # 明显是半句
+        elif len(文本) <= 6:
+            等 = 7.0                                   # 太短，可能在打字
+        elif len(文本) <= 12:
+            等 = 5.5
+        if len(msgs) >= 2:
+            等 += 1.5                                  # 已经连着说好几条，再多等一点，一次说完
+        return min(12.0, 等)
+
     def on_message(msg, listener):
+        try:
+            chat = msg.get("username") or ""
+            if not chat:
+                return
+            with 缓冲锁:
+                桶 = 缓冲.setdefault(chat, {"msgs": [], "last": 0.0})
+                桶["msgs"].append(msg)
+                桶["last"] = time.time()
+        except Exception:
+            log("缓冲消息出错：", traceback.format_exc(limit=2))
+
+    def 冲刷线程():
+        while True:
+            time.sleep(1.0)
+            try:
+                该发 = []
+                with 缓冲锁:
+                    for chat, 桶 in list(缓冲.items()):
+                        if not 桶["msgs"]:
+                            缓冲.pop(chat, None)
+                            continue
+                        if time.time() - 桶["last"] >= _等多久(桶["msgs"]):
+                            该发.append((chat, 桶["msgs"]))
+                            缓冲.pop(chat, None)
+                for chat, msgs in 该发:
+                    try:
+                        if len(msgs) == 1:
+                            _处理一条(msgs[0], None)
+                        else:
+                            # 连发好几条：合成一条转发，让模型看到完整意思，也只回一次
+                            合并 = "\n".join(_文本(m) for m in msgs if _文本(m))
+                            最后 = dict(msgs[-1])
+                            最后["content"] = 合并
+                            log("攒了 %d 条一起处理：%s" % (len(msgs), 合并[:50].replace("\n", " / ")))
+                            _处理一条(最后, None)
+                    except Exception:
+                        log("冲刷消息出错：", traceback.format_exc(limit=2))
+            except Exception:
+                pass
+
+    def _处理一条(msg, listener):
         try:
             username = msg.get("username") or ""
             if not username:
@@ -4695,6 +4762,11 @@ def main():
     log("监听已启动（0.4 秒一轮）")
     try:
         threading.Thread(target=确保RVC服务, daemon=True).start()
+    except Exception:
+        pass
+    try:
+        threading.Thread(target=冲刷线程, daemon=True).start()
+        log("攒话线程已启动（话没说完先等着）")
     except Exception:
         pass
     try:
