@@ -3503,6 +3503,22 @@ def main():
         text = re.sub(r"\[表情:\s*([^\]]+)\]", _repl, text).strip()
         images = 表情图 + images
 
+        # 随机语音：2026-11-25 主人要「语音和打字随机发」
+        if text and not images and chat:
+            try:
+                _cfg = _读json(os.path.join(HOME_DIR, "wechat-bridge-config.json"), {}) or {}
+                _率 = float(_cfg.get("语音随机率") if _cfg.get("语音随机率") not in (None, "") else 0.3)
+                _纯文本 = not re.search(r"https?://|!\[|\]\(|```|\|.*\|", text)   # 只挡链接/表格/代码，不再因为一个方括号就放弃语音
+                _净 = re.sub(r"^\[[^\]]{1,8}\]\s*", "", text).strip()   # 去掉 [问题修复模式] 这类前缀再算长度
+                if _率 > 0 and _纯文本 and 6 <= len(_净) <= 60 and _率 > random.random():
+                    log("随机走语音（%.0f%%）：%s" % (_率 * 100, text[:20]))
+                    好, 说明 = 发语音(chat, text)
+                    if 好:
+                        return {"ok": True, "chat": chat, "说": 说明}
+                    log("随机语音失败（%s），退回文字" % 说明)
+            except Exception as e:
+                log("随机语音出错：%r" % (e,))
+
         # 兜底：DSH 那边没摘干净的 markdown 图片（只认本机地址），这里再摘一次，
         # 免得微信里收到一串 "![xxx](http://127.0.0.1:...)" 的文字。
         def _摘图(m):
