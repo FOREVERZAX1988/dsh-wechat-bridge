@@ -1020,6 +1020,24 @@ def 晚安线程():
             log("晚安线程出错：%r" % (e,))
         time.sleep(60)
 
+def _补ffmpeg路径():
+    """微信 4.x 图片是 .wxgf（WXAM/HEVC），wechatauto 靠 ffmpeg 转 jpg；
+    它内部 subprocess 调 "ffmpeg"，PATH 没有就静默退回 .wxgf，视觉模型拿到就懵——
+    表现就是「图片看不到」。2026-11-25 踩过。"""
+    import shutil as _shutil
+
+    if _shutil.which("ffmpeg"):
+        return
+    候选 = [
+        os.path.join(os.path.expanduser("~"), ".dsh", "wechat-bridge-runtime", "bin"),
+        os.path.dirname(os.path.expanduser("~")) + r"\.dsh\wechat-bridge-runtime\bin",
+    ]
+    for 目录 in 候选:
+        if 目录 and os.path.exists(os.path.join(目录, "ffmpeg.exe")):
+            os.environ["PATH"] = 目录 + os.pathsep + os.environ.get("PATH", "")
+            log("把 ffmpeg 目录塞进 PATH：%s" % 目录)
+            return
+
 def 确保RVC服务():
     """常驻换声服务：活着就别管，死了拉起来。心跳文件 10 秒内更新就算活着。"""
     任务目录 = os.path.join(_RVC根, "jobs")
@@ -4775,6 +4793,10 @@ def main():
     listener = Listener(db, interval=0.4)
     listener.add_all(on_message)
     listener.start()
+    try:
+        _补ffmpeg路径()
+    except Exception:
+        pass
     log("监听已启动（0.4 秒一轮）")
     try:
         threading.Thread(target=确保RVC服务, daemon=True).start()
